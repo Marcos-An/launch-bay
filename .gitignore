@@ -1,0 +1,22 @@
+node_modules/
+dist/
+dist-electron/
+.DS_Store
+*.log
+
+# Secrets and machine-local state
+.env
+.env.*
+
+# Agent prompts/plans that live alongside this repo locally but should
+# never be checked in.
+.hermes/
+
+# Editor + tooling caches
+.vscode/
+.idea/
+.cache/
+.turbo/
+.vite/
+*.tsbuildinfo
+.tmp/
