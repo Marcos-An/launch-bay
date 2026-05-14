@@ -191,7 +191,13 @@ export function HermesChatView({
       description: skill.description,
       source: 'skill'
     }));
-    const merged = [...commands, ...skillSuggestions];
+    const seen = new Set<string>();
+    const merged = [...commands, ...skillSuggestions].filter((cmd) => {
+      const key = cmd.name.toLowerCase();
+      if (seen.has(key)) return false;
+      seen.add(key);
+      return true;
+    });
     return merged.filter((cmd) => cmd.name.toLowerCase().includes(slashQuery)).slice(0, 12);
   }, [slashQuery, availableCommands, skills]);
 
@@ -200,13 +206,7 @@ export function HermesChatView({
   }, [slashSuggestions.length, slashHighlight]);
 
   function applySlashSuggestion(command: SlashSuggestion) {
-    if (command.source === 'skill') {
-      // Skills aren't an ACP slash dispatch — drop a prompt template the
-      // agent can act on so users don't have to remember the phrasing.
-      onDraftChange(`Use the ${command.name} skill: `);
-    } else {
-      onDraftChange(`/${command.name} `);
-    }
+    onDraftChange(`/${command.name} `);
     composerInputRef.current?.focus();
   }
 
@@ -445,6 +445,48 @@ export function HermesChatView({
         onDragOver={handleDragOver}
         onDrop={(event) => void handleDrop(event)}
       >
+        {slashSuggestions.length > 0 ? (
+          <ul className="slash-suggestions" role="listbox" aria-label="Slash commands and skills">
+            {slashSuggestions.map((cmd, idx) => (
+              <li
+                key={`${cmd.source}-${cmd.name}`}
+                role="option"
+                aria-selected={idx === slashHighlight}
+                className={`slash-suggestion${idx === slashHighlight ? ' is-active' : ''}`}
+                onMouseDown={(event) => {
+                  event.preventDefault();
+                  applySlashSuggestion(cmd);
+                }}
+                onMouseEnter={() => setSlashHighlight(idx)}
+              >
+                <span className="slash-suggestion-name">/{cmd.name}</span>
+                {cmd.source === 'skill' ? <span className="slash-suggestion-badge">skill</span> : null}
+                {cmd.description ? (
+                  <span className="slash-suggestion-desc">{cmd.description}</span>
+                ) : null}
+              </li>
+            ))}
+          </ul>
+        ) : null}
+        {mentionSuggestions.length > 0 ? (
+          <ul className="slash-suggestions" role="listbox" aria-label="Project files">
+            {mentionSuggestions.map((file, idx) => (
+              <li
+                key={file}
+                role="option"
+                aria-selected={idx === mentionHighlight}
+                className={`slash-suggestion${idx === mentionHighlight ? ' is-active' : ''}`}
+                onMouseDown={(event) => {
+                  event.preventDefault();
+                  void applyMentionSuggestion(file);
+                }}
+                onMouseEnter={() => setMentionHighlight(idx)}
+              >
+                <span className="slash-suggestion-name">@{file}</span>
+              </li>
+            ))}
+          </ul>
+        ) : null}
         <div className="composer">
           {onApprovalModeChange ? (
             <label className="approval-toggle" title="Require approval for tool calls">
@@ -505,47 +547,6 @@ export function HermesChatView({
                   </li>
                 );
               })}
-            </ul>
-          ) : null}
-          {slashSuggestions.length > 0 ? (
-            <ul className="slash-suggestions" role="listbox" aria-label="Slash commands and skills">
-              {slashSuggestions.map((cmd, idx) => (
-                <li
-                  key={`${cmd.source}-${cmd.name}`}
-                  role="option"
-                  aria-selected={idx === slashHighlight}
-                  className={`slash-suggestion${idx === slashHighlight ? ' is-active' : ''}`}
-                  onMouseDown={(event) => {
-                    event.preventDefault();
-                    applySlashSuggestion(cmd);
-                  }}
-                  onMouseEnter={() => setSlashHighlight(idx)}
-                >
-                  <span className="slash-suggestion-name">{cmd.source === 'skill' ? '✨ ' : '/'}{cmd.name}</span>
-                  {cmd.description ? (
-                    <span className="slash-suggestion-desc">{cmd.description}</span>
-                  ) : null}
-                </li>
-              ))}
-            </ul>
-          ) : null}
-          {mentionSuggestions.length > 0 ? (
-            <ul className="slash-suggestions" role="listbox" aria-label="Project files">
-              {mentionSuggestions.map((file, idx) => (
-                <li
-                  key={file}
-                  role="option"
-                  aria-selected={idx === mentionHighlight}
-                  className={`slash-suggestion${idx === mentionHighlight ? ' is-active' : ''}`}
-                  onMouseDown={(event) => {
-                    event.preventDefault();
-                    void applyMentionSuggestion(file);
-                  }}
-                  onMouseEnter={() => setMentionHighlight(idx)}
-                >
-                  <span className="slash-suggestion-name">@{file}</span>
-                </li>
-              ))}
             </ul>
           ) : null}
           <div className="input-line">

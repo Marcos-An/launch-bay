@@ -1,12 +1,14 @@
 export type RuntimeStatus = 'running' | 'stopped';
 
 export type RuntimeSnapshot = {
-  status: RuntimeStatus;
+  status: 'running' | 'stopped';
   log: string;
   branch?: string;
   dirty?: boolean;
   pid?: number;
   error?: string;
+  terminal?: TerminalSnapshot;
+  terminalCommand?: string;
 };
 
 export type RuntimeUpdate = {
@@ -55,6 +57,7 @@ export type ServerConfig = {
   name: string;
   cwd: string;
   command: string;
+  nodeVersion?: string;
   url?: string;
   description?: string;
   createdAt: string;
@@ -234,8 +237,8 @@ export type TerminalSnapshot = {
   cwd: string;
 };
 
-export type TerminalDataEvent = { id: string; data: string };
-export type TerminalExitEvent = { id: string; exitCode?: number; signal?: string };
+export type TerminalDataEvent = { id: string; projectId: string; data: string };
+export type TerminalExitEvent = { id: string; projectId: string; exitCode?: number; signal?: string };
 
 export type HermesInstanceSnapshot = {
   id: string;
@@ -258,6 +261,55 @@ export type AgentCliTool = {
   version?: string;
 };
 
+export type GitFileStatus = 'modified' | 'added' | 'deleted' | 'renamed' | 'copied' | 'untracked' | 'conflicted';
+
+export type GitFileChange = {
+  path: string;
+  oldPath?: string;
+  status: GitFileStatus;
+  staged: boolean;
+  unstaged: boolean;
+  binary?: boolean;
+  additions?: number;
+  deletions?: number;
+};
+
+export type GitConflict = {
+  path: string;
+  status: string;
+  stages: {
+    base?: boolean;
+    ours?: boolean;
+    theirs?: boolean;
+  };
+};
+
+export type GitSnapshot = {
+  cwd: string;
+  branch: string | null;
+  headSha: string | null;
+  upstream?: string;
+  ahead?: number;
+  behind?: number;
+  isDirty: boolean;
+  isMerging: boolean;
+  isRebasing: boolean;
+  isCherryPicking: boolean;
+  files: GitFileChange[];
+  conflicts: GitConflict[];
+  error?: string;
+};
+
+export type FileDiffKind = 'worktree' | 'staged' | 'untracked';
+
+export type FileDiff = {
+  path: string;
+  kind: FileDiffKind;
+  diff: string;
+  binary?: boolean;
+  error?: string;
+};
+
 export type LaunchBayBridge = {
   openLocalUrl: (url: string) => Promise<{ ok: boolean; error?: string }>;
   getLaunchBayConfig: () => Promise<LaunchBayConfig>;
@@ -267,6 +319,7 @@ export type LaunchBayBridge = {
   deleteServerConfig: (serverId: string) => Promise<LaunchBayConfig>;
   chooseServerDirectory: () => Promise<{ canceled: boolean; path?: string }>;
   inspectServerDirectory: (path: string) => Promise<DirectoryInspection>;
+  listNvmNodeVersions?: () => Promise<{ versions: string[]; error?: string }>;
   getRuntimeStatus: (projectId: string) => Promise<RuntimeSnapshot>;
   startProject: (projectId: string) => Promise<RuntimeSnapshot>;
   stopProject: (projectId: string) => Promise<RuntimeSnapshot>;
@@ -274,6 +327,8 @@ export type LaunchBayBridge = {
   fetchProjectBranches: (projectId: string) => Promise<ProjectBranchState>;
   switchProjectBranch: (projectId: string, branch: string) => Promise<ProjectBranchState>;
   mergeProjectBranch: (projectId: string, branch: string) => Promise<ProjectBranchState>;
+  getProjectGitSnapshot: (projectId: string) => Promise<GitSnapshot>;
+  getProjectFileDiff: (projectId: string, filePath: string, kind?: FileDiffKind) => Promise<FileDiff>;
   onRuntimeUpdate: (callback: (event: RuntimeUpdate) => void) => () => void;
   sendHermesMessage: (
     projectId: string,

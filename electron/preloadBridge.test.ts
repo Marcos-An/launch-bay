@@ -41,6 +41,7 @@ describe('Electron preload bridge packaging', () => {
     expect(preloadSource).toContain('saveServerConfig');
     expect(preloadSource).toContain('chooseServerDirectory');
     expect(preloadSource).toContain('inspectServerDirectory');
+    expect(preloadSource).toContain('listNvmNodeVersions');
     expect(preloadSource).toContain('detectAgentCliTools');
     expect(preloadSource).toContain('listProjectBranches');
     expect(preloadSource).toContain('fetchProjectBranches');
@@ -52,6 +53,7 @@ describe('Electron preload bridge packaging', () => {
     expect(preloadSource).toContain('launch-bay:server-config-save');
     expect(preloadSource).toContain('launch-bay:server-directory-choose');
     expect(preloadSource).toContain('launch-bay:server-directory-inspect');
+    expect(preloadSource).toContain('launch-bay:nvm-node-versions');
     expect(preloadSource).toContain('launch-bay:agent-cli-tools');
     expect(preloadSource).toContain('launch-bay:project-branches');
     expect(preloadSource).toContain('launch-bay:project-branches-fetch');
@@ -74,6 +76,7 @@ describe('Electron preload bridge packaging', () => {
     expect(mainSource).toContain("ipcMain.handle('launch-bay:server-config-save'");
     expect(mainSource).toContain("ipcMain.handle('launch-bay:server-directory-choose'");
     expect(mainSource).toContain("ipcMain.handle('launch-bay:server-directory-inspect'");
+    expect(mainSource).toContain("ipcMain.handle('launch-bay:nvm-node-versions'");
     expect(mainSource).toContain("ipcMain.handle('launch-bay:agent-cli-tools'");
     expect(mainSource).toContain("ipcMain.handle('launch-bay:project-branches'");
     expect(mainSource).toContain("ipcMain.handle('launch-bay:project-branches-fetch'");

@@ -1,14 +1,23 @@
 import type { ChildProcess, SpawnOptionsWithoutStdio } from 'node:child_process';
 import { execFileSync, spawn } from 'node:child_process';
-import { existsSync, readFileSync } from 'node:fs';
+import { existsSync, readFileSync, readdirSync } from 'node:fs';
 import { homedir } from 'node:os';
 import { join } from 'node:path';
 import { expandHome } from '../paths.js';
 import { loginShellInvocation } from '../platform.js';
+import { getGitFileDiff, getGitSnapshot, type FileDiff, type FileDiffKind, type GitSnapshot } from './gitWorkbench.js';
+import { buildUserTerminalEnv } from './runtimeEnv.js';
 
 export { expandHome };
 
 export type RuntimeStatus = 'running' | 'stopped';
+
+export type RuntimeTerminalSnapshot = {
+  id: string;
+  projectId: string;
+  title: string;
+  cwd: string;
+};
 
 export type RuntimeSnapshot = {
   status: RuntimeStatus;
@@ -17,6 +26,8 @@ export type RuntimeSnapshot = {
   dirty?: boolean;
   pid?: number;
   error?: string;
+  terminal?: RuntimeTerminalSnapshot;
+  terminalCommand?: string;
 };
 
 export type RuntimeUpdate = {
@@ -26,7 +37,8 @@ export type RuntimeUpdate = {
 
 export type NodeBinInfo = {
   version: string;
-  binPath: string;
+  binPath?: string;
+  error?: string;
 };
 
 export type GitBranchInfo = {
@@ -50,13 +62,21 @@ export type ProjectBranchState = {
 type RuntimeListener = (event: RuntimeUpdate) => void;
 
 type SpawnProcess = (command: string, args: string[], options: SpawnOptionsWithoutStdio) => ChildProcess;
-type NodeBinResolver = (cwd: string) => NodeBinInfo | undefined;
+type NodeBinResolver = (cwd: string, preferredVersion?: string) => NodeBinInfo | undefined;
 type BranchResolver = (cwd: string) => string | undefined;
 type DirtyResolver = (cwd: string) => boolean | undefined;
 type BranchListResolver = (cwd: string) => GitBranchInfo[] | undefined;
 type BranchSwitcher = (cwd: string, branch: string) => void;
 type BranchFetcher = (cwd: string) => void;
 type BranchMerger = (cwd: string, branch: string) => void;
+
+type RuntimeTerminalLaunchPlan = {
+  snapshot: RuntimeSnapshot;
+  cwd?: string;
+  command?: string;
+  env?: NodeJS.ProcessEnv;
+  nodeBin?: NodeBinInfo;
+};
 
 export type ProjectRuntimeConfig = {
   id: string;
@@ -65,12 +85,14 @@ export type ProjectRuntimeConfig = {
   command: string;
   args: string[];
   env?: Record<string, string>;
+  nodeVersion?: string;
 };
 
 export type RuntimeServerConfig = {
   id: string;
   cwd: string;
   command: string;
+  nodeVersion?: string;
 };
 
 // Launch Bay is local-first: there are no built-in projects. Workspaces
@@ -79,13 +101,48 @@ export type RuntimeServerConfig = {
 // createProjectRuntimeConfig.
 export const PROJECT_RUNTIME_CONFIGS: ProjectRuntimeConfig[] = [];
 
-export function resolveNvmNodeBin(cwd: string): NodeBinInfo | undefined {
+function compareNodeVersionsDesc(left: string, right: string) {
+  const leftParts = left.split('.').map(Number);
+  const rightParts = right.split('.').map(Number);
+  for (let index = 0; index < 3; index += 1) {
+    const diff = (rightParts[index] ?? 0) - (leftParts[index] ?? 0);
+    if (diff !== 0) return diff;
+  }
+  return right.localeCompare(left);
+}
+
+function normalizeNodeVersion(value: string | undefined): string | undefined {
+  const normalized = value?.trim().replace(/^v/, '');
+  if (!normalized) return undefined;
+  return /^\d+\.\d+\.\d+$/.test(normalized) ? normalized : undefined;
+}
+
+export function listInstalledNvmNodeVersions(versionsDir = join(homedir(), '.nvm', 'versions', 'node')): string[] {
+  if (!existsSync(versionsDir)) return [];
+  try {
+    return readdirSync(versionsDir, { withFileTypes: true })
+      .filter((entry) => entry.isDirectory())
+      .map((entry) => entry.name.replace(/^v/, ''))
+      .filter((version) => /^\d+\.\d+\.\d+$/.test(version) && existsSync(join(versionsDir, `v${version}`, 'bin')))
+      .sort(compareNodeVersionsDesc);
+  } catch {
+    return [];
+  }
+}
+
+export function resolveNvmNodeBin(cwd: string, preferredVersion?: string): NodeBinInfo | undefined {
+  const explicitVersion = normalizeNodeVersion(preferredVersion);
   const nvmrcPath = join(cwd, '.nvmrc');
-  if (!existsSync(nvmrcPath)) return undefined;
-  const version = readFileSync(nvmrcPath, 'utf8').trim().replace(/^v/, '');
+  if (!explicitVersion && !existsSync(nvmrcPath)) return undefined;
+  const version = explicitVersion ?? readFileSync(nvmrcPath, 'utf8').trim().replace(/^v/, '');
   if (!version) return undefined;
+  if (!/^\d+(?:\.\d+){0,2}$/.test(version)) {
+    return { version, error: `Node version "${version}" is invalid. Use a version like 18.20.8.` };
+  }
   const binPath = join(homedir(), '.nvm', 'versions', 'node', `v${version}`, 'bin');
-  if (!existsSync(binPath)) return undefined;
+  if (!existsSync(binPath)) {
+    return explicitVersion ? { version, error: `Node v${version} is not installed.` } : undefined;
+  }
   return { version, binPath };
 }
 
@@ -198,7 +255,8 @@ export function createProjectRuntimeConfig(config: RuntimeServerConfig): Project
     cwd: config.cwd,
     displayCommand: config.command,
     command: shell.command,
-    args: [...shell.args, config.command]
+    args: [...shell.args, config.command],
+    nodeVersion: normalizeNodeVersion(config.nodeVersion)
   };
 }
 
@@ -252,6 +310,86 @@ export class ProjectRuntimeManager {
     return this.copySnapshot(projectId);
   }
 
+  prepareTerminalLaunch(projectId: string): RuntimeTerminalLaunchPlan {
+    const config = this.configs.get(projectId);
+    if (!config) {
+      return {
+        snapshot: this.setSnapshot(projectId, {
+          status: 'stopped',
+          log: '',
+          error: 'Server runtime is not configured.'
+        })
+      };
+    }
+
+    if (!config.displayCommand.trim()) {
+      return {
+        snapshot: this.setSnapshot(projectId, {
+          status: 'stopped',
+          log: '',
+          branch: this.getBranch(config),
+          dirty: this.getDirty(config),
+          error: 'Server command is empty.'
+        })
+      };
+    }
+
+    const expandedCwd = expandHome(config.cwd);
+    const nodeBin = this.resolveNodeBin(expandedCwd, config.nodeVersion);
+    if (nodeBin?.error) {
+      return {
+        snapshot: this.setSnapshot(projectId, {
+          status: 'stopped',
+          log: '',
+          branch: this.getBranch(config),
+          dirty: this.getDirty(config),
+          error: nodeBin.error
+        }),
+        nodeBin
+      };
+    }
+
+    const env = buildUserTerminalEnv(config.env, { prependPath: nodeBin?.binPath });
+
+    return {
+      snapshot: this.setSnapshot(projectId, {
+        status: 'running',
+        log: '',
+        branch: this.getBranch(config),
+        dirty: this.getDirty(config),
+        error: undefined,
+        terminalCommand: config.displayCommand
+      }),
+      cwd: expandedCwd,
+      command: config.displayCommand,
+      env,
+      nodeBin
+    };
+  }
+
+  attachTerminal(projectId: string, terminal: RuntimeTerminalSnapshot, command: string): RuntimeSnapshot {
+    const current = this.copySnapshot(projectId);
+    return this.setSnapshot(projectId, {
+      ...current,
+      status: 'running',
+      log: '',
+      pid: undefined,
+      error: undefined,
+      terminal,
+      terminalCommand: command
+    });
+  }
+
+  markStopped(projectId: string): RuntimeSnapshot {
+    const current = this.copySnapshot(projectId);
+    return this.setSnapshot(projectId, {
+      ...current,
+      status: 'stopped',
+      pid: undefined,
+      log: ''
+    });
+  }
+
   async start(projectId: string): Promise<RuntimeSnapshot> {
     const config = this.configs.get(projectId);
     if (!config) {
@@ -275,13 +413,19 @@ export class ProjectRuntimeManager {
     if (this.children.has(projectId)) return this.copySnapshot(projectId);
 
     const expandedCwd = expandHome(config.cwd);
-    const nodeBin = this.resolveNodeBin(expandedCwd);
-    const baseEnv: Record<string, string | undefined> = { ...process.env, ...config.env };
-    const env = nodeBin
-      ? { ...baseEnv, PATH: `${nodeBin.binPath}:${baseEnv.PATH ?? ''}` }
-      : baseEnv;
+    const nodeBin = this.resolveNodeBin(expandedCwd, config.nodeVersion);
+    if (nodeBin?.error) {
+      return this.setSnapshot(projectId, {
+        status: 'stopped',
+        log: `$ ${config.displayCommand}\n[runtime] ${nodeBin.error}\n`,
+        branch: this.getBranch(config),
+        dirty: this.getDirty(config),
+        error: nodeBin.error
+      });
+    }
+    const env = buildUserTerminalEnv(config.env, { prependPath: nodeBin?.binPath });
 
-    const baseLog = nodeBin
+    const baseLog = nodeBin?.binPath
       ? `$ ${config.displayCommand}\n[runtime] Node v${nodeBin.version} (${nodeBin.binPath})\n`
       : `$ ${config.displayCommand}\n`;
     this.setSnapshot(projectId, {
@@ -420,6 +564,33 @@ export class ProjectRuntimeManager {
     });
 
     return { ...nextState, runtime };
+  }
+
+  getGitSnapshot(projectId: string): GitSnapshot {
+    const config = this.configs.get(projectId);
+    if (!config) {
+      return {
+        cwd: '',
+        branch: null,
+        headSha: null,
+        isDirty: false,
+        isMerging: false,
+        isRebasing: false,
+        isCherryPicking: false,
+        files: [],
+        conflicts: [],
+        error: 'Project runtime is not configured.'
+      };
+    }
+    return getGitSnapshot(expandHome(config.cwd));
+  }
+
+  getFileDiff(projectId: string, filePath: string, kind?: FileDiffKind): FileDiff {
+    const config = this.configs.get(projectId);
+    if (!config) {
+      return { path: filePath, kind: kind ?? 'worktree', diff: '', error: 'Project runtime is not configured.' };
+    }
+    return getGitFileDiff(expandHome(config.cwd), filePath, kind);
   }
 
   fetchBranches(projectId: string): ProjectBranchState {

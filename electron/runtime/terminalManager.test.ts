@@ -67,12 +67,51 @@ describe('TerminalManager', () => {
     );
   });
 
+  it('does not leak Launch Bay dev process env into interactive terminals', () => {
+    const previousEnv = {
+      NODE_ENV: process.env.NODE_ENV,
+      NODE_OPTIONS: process.env.NODE_OPTIONS,
+      npm_lifecycle_event: process.env.npm_lifecycle_event,
+      npm_package_json: process.env.npm_package_json,
+      INIT_CWD: process.env.INIT_CWD,
+      PATH: process.env.PATH
+    };
+    process.env.NODE_ENV = 'production';
+    process.env.NODE_OPTIONS = '--max-old-space-size=8192 --expose-gc';
+    process.env.npm_lifecycle_event = 'dev';
+    process.env.npm_package_json = '/Users/marcos/Documents/launch-bay/package.json';
+    process.env.INIT_CWD = '/Users/marcos/Documents/launch-bay';
+    process.env.PATH = '/Users/marcos/Documents/launch-bay/node_modules/.bin:/snapshot/dist/node-gyp-bin:/usr/bin:/bin';
+
+    try {
+      const ptyProcess = new FakePtyProcess();
+      const spawnTerminal = vi.fn(() => ptyProcess);
+      const manager = new TerminalManager(spawnTerminal as never);
+
+      manager.create('sample', projectDir);
+      const env = spawnTerminal.mock.calls[0]?.[2]?.env as NodeJS.ProcessEnv;
+
+      expect(env.NODE_ENV).toBeUndefined();
+      expect(env.NODE_OPTIONS).toBeUndefined();
+      expect(env.npm_lifecycle_event).toBeUndefined();
+      expect(env.npm_package_json).toBeUndefined();
+      expect(env.INIT_CWD).toBeUndefined();
+      expect(env.PATH).toBe('/usr/bin:/bin');
+      expect(env.TERM).toBe('xterm-256color');
+    } finally {
+      for (const [key, value] of Object.entries(previousEnv)) {
+        if (value === undefined) delete process.env[key];
+        else process.env[key] = value;
+      }
+    }
+  });
+
   it('forwards raw terminal bytes and resize requests to the PTY process', () => {
     const ptyProcess = new FakePtyProcess();
     const manager = new TerminalManager(vi.fn(() => ptyProcess) as never);
     const snapshot = manager.create('sample', projectDir);
-    const dataEvents: string[] = [];
-    manager.onData((event) => dataEvents.push(event.data));
+    const dataEvents: Array<{ projectId: string; data: string }> = [];
+    manager.onData((event) => dataEvents.push({ projectId: event.projectId, data: event.data }));
 
     expect(manager.write(snapshot.id, 'p')).toBe(true);
     expect(manager.write(snapshot.id, '\r')).toBe(true);
@@ -82,7 +121,7 @@ describe('TerminalManager', () => {
     expect(manager.resize(snapshot.id, 101.8, 28.2)).toBe(true);
     expect(ptyProcess.resize).toHaveBeenCalledWith(101, 28);
 
-    ptyProcess.emitData('[32mready[0m\r\n');
-    expect(dataEvents).toEqual(['[32mready[0m\r\n']);
+    ptyProcess.emitData('\u001b[32mready\u001b[0m\r\n');
+    expect(dataEvents).toEqual([{ projectId: 'sample', data: '\u001b[32mready\u001b[0m\r\n' }]);
   });
 });

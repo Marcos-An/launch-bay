@@ -9,6 +9,7 @@ export type ServerFormState = {
   name: string;
   cwd: string;
   command: string;
+  nodeVersion: string;
   url: string;
   description: string;
   inspection?: DirectoryInspection;
@@ -19,11 +20,14 @@ type ServerFormModalProps = {
   form: ServerFormState;
   workspaces: WorkspaceConfig[];
   saving: boolean;
+  installedNodeVersions: string[];
+  nodeVersionsLoading: boolean;
   hasChooseDirBridge: boolean;
   onChange: (next: ServerFormState) => void;
   onClose: () => void;
   onChooseDirectory: () => void;
   onInspectDirectory: (path: string) => void;
+  onRefreshNodeVersions: () => void;
   onSave: () => void;
 };
 
@@ -31,11 +35,14 @@ export function ServerFormModal({
   form,
   workspaces,
   saving,
+  installedNodeVersions,
+  nodeVersionsLoading,
   hasChooseDirBridge,
   onChange,
   onClose,
   onChooseDirectory,
   onInspectDirectory,
+  onRefreshNodeVersions,
   onSave
 }: ServerFormModalProps) {
   useEffect(() => {
@@ -107,6 +114,28 @@ export function ServerFormModal({
           <span>Start command</span>
           <input value={form.command} onChange={(event) => onChange({ ...form, command: event.target.value })} placeholder="pnpm dev" />
         </label>
+        <div className="field-label">
+          <label htmlFor="server-node-version">Node version</label>
+          <div className="field-row">
+            <select
+              id="server-node-version"
+              value={form.nodeVersion}
+              onChange={(event) => onChange({ ...form, nodeVersion: event.target.value })}
+              aria-describedby="node-version-help"
+            >
+              <option value="">Auto (.nvmrc / PATH)</option>
+              {installedNodeVersions.map((version) => (
+                <option value={version} key={version}>v{version}</option>
+              ))}
+            </select>
+            <button className="secondary" type="button" onClick={onRefreshNodeVersions} disabled={nodeVersionsLoading}>
+              {nodeVersionsLoading ? 'Loading…' : 'Refresh'}
+            </button>
+          </div>
+          <span id="node-version-help" className="field-help">
+            Only Node versions installed in NVM are selectable. Install another version with NVM, then refresh this list.
+          </span>
+        </div>
         <label className="field-label">
           <span>Local URL</span>
           <input value={form.url} onChange={(event) => onChange({ ...form, url: event.target.value })} placeholder="http://localhost:5173" />

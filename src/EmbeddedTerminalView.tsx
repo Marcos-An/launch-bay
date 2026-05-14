@@ -9,6 +9,7 @@ type EmbeddedTerminalViewProps = {
   cwd: string;
   status: 'running' | 'exited';
   output: string;
+  isActive?: boolean;
   onWrite: (id: string, data: string) => void;
   onResize: (id: string, cols: number, rows: number) => void;
   onKill: (id: string) => void;
@@ -21,6 +22,7 @@ export function EmbeddedTerminalView({
   cwd,
   status,
   output,
+  isActive = true,
   onWrite,
   onResize,
   onKill,
@@ -103,6 +105,15 @@ export function EmbeddedTerminalView({
     const dataDisposable = terminal.onData((data) => {
       if (statusRef.current === 'running') onWriteRef.current(id, data);
     });
+    const liveDataUnsubscribe = window.launchBay?.onTerminalData?.((event) => {
+      if (event.id !== id) return;
+      terminal.write(event.data, () => terminal.scrollToBottom());
+    });
+    const liveExitUnsubscribe = window.launchBay?.onTerminalExit?.((event) => {
+      if (event.id !== id) return;
+      const suffix = event.exitCode !== undefined ? ` ${event.exitCode}` : '';
+      terminal.write(`\r\n[terminal exited${suffix}]\r\n`, () => terminal.scrollToBottom());
+    });
     const resizeDisposable = terminal.onResize(({ cols, rows }) => {
       onResizeRef.current(id, cols, rows);
     });
@@ -121,6 +132,8 @@ export function EmbeddedTerminalView({
     return () => {
       window.cancelAnimationFrame(frame);
       resizeObserver?.disconnect();
+      liveDataUnsubscribe?.();
+      liveExitUnsubscribe?.();
       dataDisposable.dispose();
       resizeDisposable.dispose();
       terminal.dispose();
@@ -132,6 +145,7 @@ export function EmbeddedTerminalView({
 
   useEffect(() => {
     if (!canMountXterm) return;
+    if (window.launchBay?.onTerminalData) return;
     const terminal = terminalRef.current;
     if (!terminal) return;
 
@@ -142,7 +156,7 @@ export function EmbeddedTerminalView({
 
     const nextChunk = output.slice(writtenLengthRef.current);
     if (nextChunk) {
-      terminal.write(nextChunk);
+      terminal.write(nextChunk, () => terminal.scrollToBottom());
       writtenLengthRef.current = output.length;
     }
   }, [output, canMountXterm]);
@@ -150,11 +164,19 @@ export function EmbeddedTerminalView({
   useEffect(() => {
     if (!canMountXterm) return;
     const terminal = terminalRef.current;
-    if (!terminal) return;
-    if (status === 'running') {
-      terminal.focus();
-    }
-  }, [status, canMountXterm]);
+    const fitAddon = fitAddonRef.current;
+    if (!terminal || !fitAddon || !isActive) return;
+    const frame = window.requestAnimationFrame(() => {
+      try {
+        fitAddon.fit();
+        onResizeRef.current(id, terminal.cols, terminal.rows);
+      } catch {
+        // Hidden terminals will refit when selected.
+      }
+      if (status === 'running') terminal.focus();
+    });
+    return () => window.cancelAnimationFrame(frame);
+  }, [isActive, status, id, canMountXterm]);
 
   function handleFallbackKeyDown(event: KeyboardEvent<HTMLTextAreaElement>) {
     if (status !== 'running' || event.metaKey || event.ctrlKey || event.altKey) return;
@@ -177,7 +199,7 @@ export function EmbeddedTerminalView({
   }
 
   return (
-    <section className="embedded-card embedded-terminal" aria-label={title}>
+    <section className="embedded-card embedded-terminal" aria-label={title} hidden={!isActive}>
       <div className="embedded-card-bar">
         <div>
           <div className="embedded-title">{title}</div>

@@ -1,4 +1,3 @@
-import { type RefObject } from 'react';
 import { EmbeddedTerminalView } from '../EmbeddedTerminalView';
 import type { ActiveGitOperation, EmbeddedTerminal, GitOperation } from '../appTypes';
 import type { GitBranchInfo, ProjectBranchState } from '../types';
@@ -13,15 +12,13 @@ function formatBranchDivergence(branch: GitBranchInfo) {
 type ServerViewProps = {
   projectName: string;
   projectCommand: string;
+  projectNodeVersion: string;
   projectCwd: string;
   projectUrl: string;
   projectSubtitle: string;
   currentStatus: 'running' | 'stopped' | 'draft';
   currentPid?: number;
   branchSubtitle?: string;
-  visibleLog: string;
-  logRef: RefObject<HTMLPreElement>;
-  logCopied: boolean;
   hasConfiguredServer: boolean;
   hasRuntimeBridge: boolean;
   hasEmbeddedTerminalBridge: boolean;
@@ -41,6 +38,7 @@ type ServerViewProps = {
   canMergeBranches: boolean;
   hasBranchBridge: boolean;
   projectTerminals: EmbeddedTerminal[];
+  activeTerminalId?: string;
   onEditServer: () => void;
   onNewServer: () => void;
   onStart: () => void;
@@ -49,9 +47,8 @@ type ServerViewProps = {
   onRunGitOperation: (action: GitOperation, branch?: string) => void;
   onRequestMergeBranch: (sourceBranch: string) => void;
   onBranchFilterChange: (value: string) => void;
-  onCopyLog: () => void;
-  onClearLog: () => void;
   onOpenEmbeddedTerminal: () => void;
+  onSelectTerminal: (id: string) => void;
   onWriteTerminal: (id: string, data: string) => void;
   onResizeTerminal: (id: string, cols: number, rows: number) => void;
   onKillTerminal: (id: string) => void;
@@ -61,15 +58,13 @@ type ServerViewProps = {
 export function ServerView({
   projectName,
   projectCommand,
+  projectNodeVersion,
   projectCwd,
   projectUrl,
   projectSubtitle,
   currentStatus,
   currentPid,
   branchSubtitle,
-  visibleLog,
-  logRef,
-  logCopied,
   hasConfiguredServer,
   hasRuntimeBridge,
   hasEmbeddedTerminalBridge,
@@ -89,6 +84,7 @@ export function ServerView({
   canMergeBranches,
   hasBranchBridge,
   projectTerminals,
+  activeTerminalId,
   onEditServer,
   onNewServer,
   onStart,
@@ -97,14 +93,15 @@ export function ServerView({
   onRunGitOperation,
   onRequestMergeBranch,
   onBranchFilterChange,
-  onCopyLog,
-  onClearLog,
   onOpenEmbeddedTerminal,
+  onSelectTerminal,
   onWriteTerminal,
   onResizeTerminal,
   onKillTerminal,
   onCloseTerminal
 }: ServerViewProps) {
+  const activeTerminal = projectTerminals.find((terminal) => terminal.id === activeTerminalId) ?? projectTerminals[0];
+
   return (
     <section className="server-view" aria-label={`${projectName} server`}>
       <div className="server-head">
@@ -170,6 +167,10 @@ export function ServerView({
         <div className="runtime-cell">
           <div className="runtime-label">Command</div>
           <div className={`runtime-value ${projectCommand ? '' : 'runtime-value-empty'}`}>{projectCommand || 'Not configured'}</div>
+        </div>
+        <div className="runtime-cell">
+          <div className="runtime-label">Node</div>
+          <div className={`runtime-value ${projectNodeVersion ? '' : 'runtime-value-empty'}`}>{projectNodeVersion ? `v${projectNodeVersion.replace(/^v/, '')}` : 'Auto'}</div>
         </div>
         <div className="runtime-cell">
           <div className="runtime-label">Working directory</div>
@@ -265,36 +266,66 @@ export function ServerView({
         {branchConfigWarning ? <div className="config-warning" role="status">{branchConfigWarning}</div> : null}
       </section>
 
-      <div className="terminal-panel" aria-label="Server logs">
+      <div className="terminal-panel" aria-label="Server terminal">
         <div className="terminal-bar">
-          <h2>Logs<span className="terminal-bar-meta">{projectName}</span></h2>
+          <h2>Terminal<span className="terminal-bar-meta">{projectName}</span></h2>
           <div className="terminal-actions">
-            <button className="terminal-action" type="button" onClick={onCopyLog}>{logCopied ? 'Copied' : 'Copy log'}</button>
-            <button className="terminal-action" type="button" onClick={onClearLog}>Clear</button>
-            <button disabled={!hasEmbeddedTerminalBridge} className="terminal-action" type="button" aria-label="Open terminal" onClick={onOpenEmbeddedTerminal}>New terminal</button>
+            {hasEmbeddedTerminalBridge ? (
+              <button
+                className="terminal-action"
+                type="button"
+                onClick={onOpenEmbeddedTerminal}
+                disabled={!hasConfiguredServer}
+              >
+                New terminal
+              </button>
+            ) : (
+              <span className="terminal-bar-meta">Restart Launch Bay to enable terminal controls.</span>
+            )}
           </div>
         </div>
-        <pre ref={logRef}>{visibleLog}</pre>
+        {projectTerminals.length > 0 && activeTerminal ? (
+          <div className="embedded-stack embedded-stack-primary" aria-label={`${projectName} terminal sessions`}>
+            {projectTerminals.length > 1 ? (
+              <div className="terminal-tabs" role="tablist" aria-label="Terminal sessions">
+                {projectTerminals.map((terminal) => (
+                  <button
+                    key={terminal.id}
+                    className={`terminal-tab ${terminal.id === activeTerminal.id ? 'terminal-tab-active' : ''}`}
+                    type="button"
+                    role="tab"
+                    aria-selected={terminal.id === activeTerminal.id}
+                    onClick={() => onSelectTerminal(terminal.id)}
+                  >
+                    {terminal.title}
+                  </button>
+                ))}
+              </div>
+            ) : null}
+            <div className="terminal-panes">
+              {projectTerminals.map((terminal) => (
+                <EmbeddedTerminalView
+                  key={terminal.id}
+                  id={terminal.id}
+                  title={terminal.title}
+                  cwd={terminal.cwd}
+                  status={terminal.status}
+                  output={terminal.output}
+                  isActive={terminal.id === activeTerminal.id}
+                  onWrite={onWriteTerminal}
+                  onResize={onResizeTerminal}
+                  onKill={onKillTerminal}
+                  onClose={onCloseTerminal}
+                />
+              ))}
+            </div>
+          </div>
+        ) : (
+          <div className="terminal-empty" role="status">
+            {hasConfiguredServer ? 'Click Start to open this server in a real terminal.' : 'Configure a server to open its terminal.'}
+          </div>
+        )}
       </div>
-
-      {projectTerminals.length > 0 ? (
-        <div className="embedded-stack" aria-label={`${projectName} embedded sessions`}>
-          {projectTerminals.map((terminal) => (
-            <EmbeddedTerminalView
-              key={terminal.id}
-              id={terminal.id}
-              title={terminal.title}
-              cwd={terminal.cwd}
-              status={terminal.status}
-              output={terminal.output}
-              onWrite={onWriteTerminal}
-              onResize={onResizeTerminal}
-              onKill={onKillTerminal}
-              onClose={onCloseTerminal}
-            />
-          ))}
-        </div>
-      ) : null}
     </section>
   );
 }

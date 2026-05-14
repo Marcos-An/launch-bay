@@ -5,6 +5,7 @@ import { homedir } from 'node:os';
 import { basename, dirname, join } from 'node:path';
 import { expandHome } from '../paths.js';
 import { interactiveShellInvocation } from '../platform.js';
+import { buildUserTerminalEnv } from './runtimeEnv.js';
 
 export type TerminalSnapshot = {
   id: string;
@@ -13,8 +14,8 @@ export type TerminalSnapshot = {
   cwd: string;
 };
 
-export type TerminalDataEvent = { id: string; data: string };
-export type TerminalExitEvent = { id: string; exitCode?: number; signal?: string };
+export type TerminalDataEvent = { id: string; projectId: string; data: string };
+export type TerminalExitEvent = { id: string; projectId: string; exitCode?: number; signal?: string };
 
 type DataListener = (event: TerminalDataEvent) => void;
 type ExitListener = (event: TerminalExitEvent) => void;
@@ -120,21 +121,24 @@ function childProcessFallback(
 
 const defaultSpawnTerminal: SpawnTerminal = (command, args, options) => {
   const nodePty = loadNodePty();
-  if (nodePty) {
-    try {
-      return nodePty.spawn(command, args, {
-        name: 'xterm-256color',
-        cwd: options.cwd,
-        env: options.env,
-        cols: options.cols,
-        rows: options.rows
-      });
-    } catch {
-      return childProcessFallback(command, args, options);
-    }
+  if (!nodePty) {
+    throw new Error('Real PTY backend is unavailable. Rebuild/install node-pty before using Launch Bay terminals.');
   }
 
-  return childProcessFallback(command, args, options);
+  try {
+    return nodePty.spawn(command, args, {
+      name: 'xterm-256color',
+      cwd: options.cwd,
+      env: options.env,
+      cols: options.cols,
+      rows: options.rows
+    });
+  } catch (error) {
+    if (process.env.LAUNCH_BAY_ALLOW_PIPE_TERMINAL_FALLBACK === '1') {
+      return childProcessFallback(command, args, options);
+    }
+    throw error;
+  }
 };
 
 export class TerminalManager {
@@ -145,30 +149,27 @@ export class TerminalManager {
 
   constructor(private readonly spawnTerminal: SpawnTerminal = defaultSpawnTerminal) {}
 
-  create(projectId: string, rawCwd: string): TerminalSnapshot {
+  create(projectId: string, rawCwd: string, options: { env?: NodeJS.ProcessEnv; title?: string } = {}): TerminalSnapshot {
     const id = makeTerminalId();
     const cwd = resolveFirstCwd(rawCwd);
     const safeCwd = existsSync(cwd) ? cwd : homedir();
     const counter = (this.counters.get(projectId) ?? 0) + 1;
     this.counters.set(projectId, counter);
-    const title = `Terminal ${counter} · ${basename(safeCwd) || safeCwd}`;
+    const title = options.title ?? `Terminal ${counter} · ${basename(safeCwd) || safeCwd}`;
     const snapshot: TerminalSnapshot = { id, projectId, title, cwd: safeCwd };
 
     const { command, args } = pickShell();
-    const env: NodeJS.ProcessEnv = {
-      ...process.env,
-      TERM: 'xterm-256color',
-      COLORTERM: process.env.COLORTERM ?? 'truecolor'
-    };
+    const env = buildUserTerminalEnv(options.env, { term: 'xterm-256color' });
 
     const terminalProcess = this.spawnTerminal(command, args, { cwd: safeCwd, env, cols: 120, rows: 30 });
     this.entries.set(id, { snapshot, process: terminalProcess });
 
-    terminalProcess.onData((data) => this.emitData({ id, data }));
+    terminalProcess.onData((data) => this.emitData({ id, projectId, data }));
     terminalProcess.onExit((event) => {
       this.entries.delete(id);
       this.emitExit({
         id,
+        projectId,
         exitCode: event.exitCode,
         signal: event.signal !== undefined ? String(event.signal) : undefined
       });

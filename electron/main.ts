@@ -14,9 +14,10 @@ import {
 } from './hermes/hermesClient.js';
 import { HermesInstanceManager } from './hermes/hermesInstanceManager.js';
 import { createHermesSessionStore } from './hermes/hermesSessionStore.js';
+import { parseHermesSkillsList } from './hermes/hermesSkills.js';
 import { createLocalConfigStore, type LaunchBayConfig, type ServerDraft, type WorkspaceDraft } from './config/localConfigStore.js';
 import { inspectServerDirectory } from './config/directoryInspection.js';
-import { PROJECT_RUNTIME_CONFIGS, ProjectRuntimeManager, createProjectRuntimeConfig, expandHome } from './runtime/projectRuntime.js';
+import { PROJECT_RUNTIME_CONFIGS, ProjectRuntimeManager, createProjectRuntimeConfig, expandHome, listInstalledNvmNodeVersions } from './runtime/projectRuntime.js';
 import { TerminalManager } from './runtime/terminalManager.js';
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
@@ -88,6 +89,7 @@ const hermesSharedOptions = {
 
 const hermesManager = new HermesSessionManager(hermesSharedOptions);
 const terminalManager = new TerminalManager();
+const serverTerminalIds = new Map<string, string>();
 let localConfigStore: ReturnType<typeof createLocalConfigStore> | undefined;
 let hermesInstanceManager: HermesInstanceManager | undefined;
 
@@ -218,14 +220,39 @@ terminalManager.onData((event) => {
 });
 
 terminalManager.onExit((event) => {
+  if (serverTerminalIds.get(event.projectId) === event.id) {
+    serverTerminalIds.delete(event.projectId);
+    runtimeManager.markStopped(event.projectId);
+  }
   for (const win of BrowserWindow.getAllWindows()) {
     win.webContents.send('launch-bay:terminal-exit', event);
   }
 });
 
 ipcMain.handle('launch-bay:runtime-status', async (_event, projectId: string) => runtimeManager.getSnapshot(projectId));
-ipcMain.handle('launch-bay:start-project', async (_event, projectId: string) => runtimeManager.start(projectId));
-ipcMain.handle('launch-bay:stop-project', async (_event, projectId: string) => runtimeManager.stop(projectId));
+ipcMain.handle('launch-bay:start-project', async (_event, projectId: string) => {
+  const existingTerminalId = serverTerminalIds.get(projectId);
+  const existingTerminal = existingTerminalId
+    ? terminalManager.list(projectId).find((terminal) => terminal.id === existingTerminalId)
+    : undefined;
+  const launch = runtimeManager.prepareTerminalLaunch(projectId);
+  if (!launch.cwd || !launch.command || !launch.env || launch.snapshot.status !== 'running') return launch.snapshot;
+
+  const terminal = existingTerminal ?? terminalManager.create(projectId, launch.cwd, {
+    env: launch.env,
+    title: `${basename(launch.cwd)} terminal`
+  });
+  serverTerminalIds.set(projectId, terminal.id);
+  const snapshot = runtimeManager.attachTerminal(projectId, terminal, launch.command);
+  terminalManager.write(terminal.id, `${launch.command}\r`);
+  return snapshot;
+});
+ipcMain.handle('launch-bay:stop-project', async (_event, projectId: string) => {
+  const terminalId = serverTerminalIds.get(projectId);
+  if (terminalId) terminalManager.write(terminalId, '\x03');
+  return runtimeManager.markStopped(projectId);
+});
+ipcMain.handle('launch-bay:nvm-node-versions', async () => ({ versions: listInstalledNvmNodeVersions() }));
 
 ipcMain.handle(
   'launch-bay:hermes-send',
@@ -254,35 +281,19 @@ ipcMain.handle('launch-bay:hermes-sessions-list', async (_event, cwd?: string) =
 // Listing files under a project cwd. Used by the composer's @-mention.
 // Prefer `git ls-files` (fast and respects .gitignore) and fall back to a
 // shallow walk when the cwd is not a git repository.
-// Best-effort parser for `hermes skills list` (and `--enabled-only`). The
-// command renders a rich table; we strip box-drawing characters and pick
-// the first column. Returns at most ~200 entries to keep IPC light.
+// Best-effort parser for `hermes skills list --enabled-only`. Force a wide
+// table so long skill names remain valid slash commands instead of being
+// truncated with `…` by the CLI renderer.
 ipcMain.handle('launch-bay:list-hermes-skills', async () => {
   try {
-    const { stdout } = await execFile('hermes', ['skills', 'list', '--enabled-only'], {
+    const hermesBin = await resolveHermesBinary();
+    if (!hermesBin) return { skills: [], error: 'Hermes CLI not found' };
+    const { stdout } = await execFile(hermesBin, ['skills', 'list', '--enabled-only'], {
+      env: { ...process.env, COLUMNS: '240' },
       maxBuffer: 4 * 1024 * 1024,
       timeout: 4_000
     });
-    const skills: { name: string; description: string }[] = [];
-    const seen = new Set<string>();
-    for (const rawLine of stdout.split(/\r?\n/)) {
-      const line = rawLine.replace(/[─-╿]/g, '').trim();
-      if (!line || !line.startsWith('│')) continue;
-      const cells = line
-        .split('│')
-        .map((cell) => cell.trim())
-        .filter((cell) => cell.length > 0);
-      if (cells.length < 1) continue;
-      const name = cells[0];
-      if (!name || name === 'Name' || seen.has(name)) continue;
-      seen.add(name);
-      skills.push({
-        name,
-        description: cells[1] && cells[1] !== 'Category' ? `${cells[1]} · skill` : 'skill'
-      });
-      if (skills.length >= 200) break;
-    }
-    return { skills };
+    return { skills: parseHermesSkillsList(stdout) };
   } catch (error) {
     return { skills: [], error: error instanceof Error ? error.message : String(error) };
   }
@@ -422,6 +433,10 @@ ipcMain.handle('launch-bay:project-branch-switch', async (_event, projectId: str
 );
 ipcMain.handle('launch-bay:project-branch-merge', async (_event, projectId: string, branch: string) =>
   runtimeManager.mergeBranch(projectId, branch)
+);
+ipcMain.handle('launch-bay:project-git-snapshot', async (_event, projectId: string) => runtimeManager.getGitSnapshot(projectId));
+ipcMain.handle('launch-bay:project-file-diff', async (_event, projectId: string, filePath: string, kind?: 'worktree' | 'staged' | 'untracked') =>
+  runtimeManager.getFileDiff(projectId, filePath, kind)
 );
 
 function isLocalBrowserUrl(value: unknown): value is string {

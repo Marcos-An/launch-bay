@@ -9,6 +9,7 @@ contextBridge.exposeInMainWorld('launchBay', {
   deleteServerConfig: (serverId) => ipcRenderer.invoke('launch-bay:server-config-delete', serverId),
   chooseServerDirectory: () => ipcRenderer.invoke('launch-bay:server-directory-choose'),
   inspectServerDirectory: (path) => ipcRenderer.invoke('launch-bay:server-directory-inspect', path),
+  listNvmNodeVersions: () => ipcRenderer.invoke('launch-bay:nvm-node-versions'),
   getRuntimeStatus: (projectId) => ipcRenderer.invoke('launch-bay:runtime-status', projectId),
   startProject: (projectId) => ipcRenderer.invoke('launch-bay:start-project', projectId),
   stopProject: (projectId) => ipcRenderer.invoke('launch-bay:stop-project', projectId),
@@ -72,6 +73,8 @@ contextBridge.exposeInMainWorld('launchBay', {
   fetchProjectBranches: (projectId) => ipcRenderer.invoke('launch-bay:project-branches-fetch', projectId),
   switchProjectBranch: (projectId, branch) => ipcRenderer.invoke('launch-bay:project-branch-switch', projectId, branch),
   mergeProjectBranch: (projectId, branch) => ipcRenderer.invoke('launch-bay:project-branch-merge', projectId, branch),
+  getProjectGitSnapshot: (projectId) => ipcRenderer.invoke('launch-bay:project-git-snapshot', projectId),
+  getProjectFileDiff: (projectId, filePath, kind) => ipcRenderer.invoke('launch-bay:project-file-diff', projectId, filePath, kind),
   onHermesInstanceUpdate: (callback) => {
     const listener = (_event, payload) => callback(payload);
     ipcRenderer.on('launch-bay:hermes-instance-update', listener);

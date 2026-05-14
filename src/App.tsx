@@ -1,7 +1,8 @@
-import { useEffect, useMemo, useRef, useState } from 'react';
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { HermesChatView } from './components/HermesChatView';
 import { AgentSessionView } from './components/AgentSessionView';
 import { ServerView } from './components/ServerView';
+import { ChangesWorkbench } from './components/ChangesWorkbench';
 import { Sidebar } from './components/Sidebar';
 import { MergeConfirmationModal } from './components/MergeConfirmationModal';
 import { NewSessionModal } from './components/NewSessionModal';
@@ -198,6 +199,7 @@ function createEmptyServerForm(workspaces: WorkspaceConfig[], selectedWorkspaceI
     name: preferredWorkspace?.name ?? '',
     cwd: preferredWorkspace?.cwd ?? '',
     command: '',
+    nodeVersion: '',
     url: '',
     description: ''
   };
@@ -208,6 +210,10 @@ function basenameFromPath(path: string): string {
   if (!trimmed) return '';
   const segments = trimmed.split(/[\\/]/);
   return segments[segments.length - 1] || '';
+}
+
+function isFullNodeVersion(value: string | undefined): value is string {
+  return /^\d+\.\d+\.\d+$/.test(value ?? '');
 }
 
 function readStoredSurface(): Surface {
@@ -242,8 +248,10 @@ function App() {
   const [pendingPermission, setPendingPermission] = useState<HermesPermissionRequest | undefined>(undefined);
   const [projectFiles, setProjectFiles] = useState<Record<string, string[]>>({});
   const [hermesSkills, setHermesSkills] = useState<{ name: string; description: string }[]>([]);
-  const [clearedLogBaselines, setClearedLogBaselines] = useState<Record<string, string>>({});
+  const [nvmNodeVersions, setNvmNodeVersions] = useState<string[]>([]);
+  const [nodeVersionsLoading, setNodeVersionsLoading] = useState(false);
   const [embeddedTerminals, setEmbeddedTerminals] = useState<Record<string, EmbeddedTerminal[]>>({});
+  const [activeTerminalIds, setActiveTerminalIds] = useState<Record<string, string>>({});
   const [agentSessions, setAgentSessions] = useState<Record<string, AgentSession[]>>({});
   const [availableAgentTools, setAvailableAgentTools] = useState<SupportedAgentCliTool[]>([]);
   const [defaultHermesSessionNames, setDefaultHermesSessionNames] = useState<Record<string, string>>({});
@@ -256,11 +264,30 @@ function App() {
   const [renameDraft, setRenameDraft] = useState('');
   const [renamingServerId, setRenamingServerId] = useState<string | undefined>(undefined);
   const [renameServerDraft, setRenameServerDraft] = useState('');
-  const [logCopied, setLogCopied] = useState(false);
-  const logCopyTimeoutRef = useRef<number | undefined>(undefined);
   const composerInputRef = useRef<HTMLTextAreaElement>(null);
   const transcriptRef = useRef<HTMLDivElement>(null);
-  const logRef = useRef<HTMLPreElement>(null);
+
+  const refreshNvmNodeVersions = useCallback(async () => {
+    const bridge = window.launchBay;
+    if (!bridge?.listNvmNodeVersions) {
+      setNvmNodeVersions([]);
+      return;
+    }
+    setNodeVersionsLoading(true);
+    try {
+      const result = await bridge.listNvmNodeVersions();
+      setNvmNodeVersions(result.versions);
+    } catch {
+      setNvmNodeVersions([]);
+    } finally {
+      setNodeVersionsLoading(false);
+    }
+  }, []);
+
+  useEffect(() => {
+    if (!serverForm) return;
+    void refreshNvmNodeVersions();
+  }, [refreshNvmNodeVersions, serverForm?.mode, serverForm?.id]);
 
   useEffect(() => {
     const previousOverflow = document.body.style.overflow;
@@ -328,8 +355,11 @@ function App() {
   const runtimeSnapshot = runtimeSnapshots[selectedRuntimeId];
   const projectBranchState = projectBranches[selectedRuntimeId];
   const currentStatus = runtimeSnapshot?.status ?? selectedServerProject.status;
-  const currentLog = runtimeSnapshot?.log || selectedServerProject.log;
   const currentBranch = runtimeSnapshot?.branch ?? projectBranchState?.current;
+  const projectTerminals = embeddedTerminals[selectedRuntimeId] ?? [];
+  const activeTerminalId = projectTerminals.some((terminal) => terminal.id === activeTerminalIds[selectedRuntimeId])
+    ? activeTerminalIds[selectedRuntimeId]
+    : projectTerminals[0]?.id;
   const currentDirty = runtimeSnapshot?.dirty ?? projectBranchState?.dirty;
   const branchSubtitle = currentBranch
     ? currentDirty
@@ -369,14 +399,6 @@ function App() {
   const isHermesThinking = hermesSnapshot.pending;
   const hermesElapsed = formatElapsed(elapsedSeconds);
   const contextUsageLabel = formatContextUsage(hermesSnapshot.contextUsage);
-  const displayedLog = hasRuntimeBridge
-    ? currentLog
-    : `${currentLog}\n\n[runtime] Local process controls require the Launch Bay Electron window. If you are seeing this in a browser preview, switch to the desktop app. If you are seeing it in Electron, restart Launch Bay with pnpm dev so the preload bridge is rebuilt.`;
-  const clearedBaseline = clearedLogBaselines[selectedRuntimeId] ?? '';
-  const visibleLog = clearedBaseline && displayedLog.startsWith(clearedBaseline)
-    ? displayedLog.slice(clearedBaseline.length)
-    : displayedLog;
-  const projectTerminals = embeddedTerminals[selectedRuntimeId] ?? [];
   const projectAgentSessions = agentSessions[selectedProject.id] ?? [];
   const selectedAgentSession = projectAgentSessions.find((session) => session.id === selectedAgentSessionId);
   const branchOptions = projectBranchState?.branches ?? [];
@@ -483,18 +505,21 @@ function App() {
   }, []);
 
   useEffect(() => {
+    const shouldMirrorOutputForFallback =
+      typeof window.matchMedia !== 'function' || window.navigator.userAgent.toLowerCase().includes('jsdom');
+    if (!shouldMirrorOutputForFallback) return undefined;
+
     return window.launchBay?.onTerminalData?.((event) => {
       setEmbeddedTerminals((current) => {
-        const next = { ...current };
-        for (const [projectId, terminals] of Object.entries(current)) {
-          const index = terminals.findIndex((terminal) => terminal.id === event.id);
-          if (index === -1) continue;
-          next[projectId] = terminals.map((terminal, itemIndex) =>
+        const terminals = current[event.projectId] ?? [];
+        const index = terminals.findIndex((terminal) => terminal.id === event.id);
+        if (index === -1) return current;
+        return {
+          ...current,
+          [event.projectId]: terminals.map((terminal, itemIndex) =>
             itemIndex === index ? { ...terminal, output: `${terminal.output}${event.data}` } : terminal
-          );
-          break;
-        }
-        return next;
+          )
+        };
       });
     });
   }, []);
@@ -502,17 +527,24 @@ function App() {
   useEffect(() => {
     return window.launchBay?.onTerminalExit?.((event) => {
       setEmbeddedTerminals((current) => {
-        const next = { ...current };
-        for (const [projectId, terminals] of Object.entries(current)) {
-          if (!terminals.some((terminal) => terminal.id === event.id)) continue;
-          next[projectId] = terminals.map((terminal) =>
+        const shouldMirrorOutputForFallback =
+          typeof window.matchMedia !== 'function' || window.navigator.userAgent.toLowerCase().includes('jsdom');
+        const terminals = current[event.projectId] ?? [];
+        if (!terminals.some((terminal) => terminal.id === event.id)) return current;
+        return {
+          ...current,
+          [event.projectId]: terminals.map((terminal) =>
             terminal.id === event.id
-              ? { ...terminal, status: 'exited', output: `${terminal.output}\n[terminal exited${event.exitCode !== undefined ? ` ${event.exitCode}` : ''}]\n` }
+              ? {
+                  ...terminal,
+                  status: 'exited',
+                  output: shouldMirrorOutputForFallback
+                    ? `${terminal.output}\n[terminal exited${event.exitCode !== undefined ? ` ${event.exitCode}` : ''}]\n`
+                    : terminal.output
+                }
               : terminal
-          );
-          break;
-        }
-        return next;
+          )
+        };
       });
     });
   }, []);
@@ -686,19 +718,6 @@ function App() {
     transcript.scrollTop = transcript.scrollHeight;
   }, [hermesSnapshot.messages, isHermesThinking, selectedProject.id]);
 
-  useEffect(() => {
-    if (surface !== 'server') return;
-    const log = logRef.current;
-    if (!log) return;
-    log.scrollTop = log.scrollHeight;
-  }, [surface, visibleLog, selectedRuntimeId]);
-
-  useEffect(() => {
-    return () => {
-      if (logCopyTimeoutRef.current !== undefined) window.clearTimeout(logCopyTimeoutRef.current);
-    };
-  }, []);
-
   function selectProject(id: string) {
     setProjectName(id);
     setDraft('');
@@ -760,6 +779,7 @@ function App() {
       name: selectedServerConfig.name,
       cwd: selectedServerConfig.cwd,
       command: selectedServerConfig.command,
+      nodeVersion: isFullNodeVersion(selectedServerConfig.nodeVersion) ? selectedServerConfig.nodeVersion : '',
       url: selectedServerConfig.url ?? '',
       description: selectedServerConfig.description ?? ''
     });
@@ -821,6 +841,7 @@ function App() {
         name,
         cwd,
         command: form.command.trim(),
+        nodeVersion: nvmNodeVersions.includes(form.nodeVersion.trim()) ? form.nodeVersion.trim() : undefined,
         url: form.url.trim() || undefined,
         description: form.description.trim() || undefined
       });
@@ -843,13 +864,36 @@ function App() {
 
   async function startServer() {
     if (window.launchBay?.startProject) {
-      applyRuntimeSnapshot(await window.launchBay.startProject(selectedRuntimeId));
+      try {
+        const snapshot = await window.launchBay.startProject(selectedRuntimeId);
+        applyRuntimeSnapshot(snapshot);
+        if (snapshot.terminal) {
+          setEmbeddedTerminals((current) => {
+            const terminals = current[selectedRuntimeId] ?? [];
+            const nextTerminal = { ...snapshot.terminal!, output: '', status: 'running' as const };
+            return {
+              ...current,
+              [selectedRuntimeId]: terminals.some((terminal) => terminal.id === nextTerminal.id)
+                ? terminals.map((terminal) => terminal.id === nextTerminal.id ? { ...terminal, status: 'running' as const } : terminal)
+                : [nextTerminal]
+            };
+          });
+          setActiveTerminalIds((current) => ({ ...current, [selectedRuntimeId]: snapshot.terminal!.id }));
+        }
+      } catch (error) {
+        applyRuntimeSnapshot({
+          status: 'stopped',
+          log: '',
+          error: error instanceof Error ? error.message : 'Could not start the terminal.'
+        });
+      }
       return;
     }
 
     applyRuntimeSnapshot({
       status: 'stopped',
-      log: `${selectedServerProject.log}\n\n[runtime] Local process controls require the Launch Bay Electron window. If you are seeing this in a browser preview, switch to the desktop app. If you are seeing it in Electron, restart Launch Bay with pnpm dev so the preload bridge is rebuilt.`
+      log: '',
+      error: 'Local process controls require the Launch Bay Electron window.'
     });
   }
 
@@ -861,7 +905,7 @@ function App() {
 
     applyRuntimeSnapshot({
       status: 'stopped',
-      log: `${currentLog}\n[process] stop requested\n`
+      log: '',
     });
   }
 
@@ -911,6 +955,7 @@ function App() {
         { ...terminal, output: '', status: 'running' }
       ]
     }));
+    setActiveTerminalIds((current) => ({ ...current, [selectedRuntimeId]: terminal.id }));
   }
 
   async function killEmbeddedTerminal(id: string) {
@@ -925,10 +970,19 @@ function App() {
 
   async function closeEmbeddedTerminal(id: string) {
     await window.launchBay?.killTerminal?.(id);
-    setEmbeddedTerminals((current) => ({
-      ...current,
-      [selectedRuntimeId]: (current[selectedRuntimeId] ?? []).filter((terminal) => terminal.id !== id)
-    }));
+    let fallbackTerminalId: string | undefined;
+    setEmbeddedTerminals((current) => {
+      const nextTerminals = (current[selectedRuntimeId] ?? []).filter((terminal) => terminal.id !== id);
+      fallbackTerminalId = nextTerminals[0]?.id;
+      return {
+        ...current,
+        [selectedRuntimeId]: nextTerminals
+      };
+    });
+    setActiveTerminalIds((current) => {
+      if (current[selectedRuntimeId] !== id) return current;
+      return { ...current, [selectedRuntimeId]: fallbackTerminalId ?? '' };
+    });
   }
 
   function writeEmbeddedTerminal(id: string, data: string) {
@@ -1125,23 +1179,6 @@ function App() {
     await window.launchBay?.openLocalUrl?.(selectedServerProject.url);
   }
 
-  async function copyLog() {
-    const clipboard = window.navigator.clipboard;
-    if (!clipboard || typeof clipboard.writeText !== 'function') return;
-    try {
-      await clipboard.writeText(visibleLog);
-      setLogCopied(true);
-      if (logCopyTimeoutRef.current !== undefined) window.clearTimeout(logCopyTimeoutRef.current);
-      logCopyTimeoutRef.current = window.setTimeout(() => setLogCopied(false), 1600);
-    } catch {
-      // Stay silent per UX guidance — keep label as Copy log.
-    }
-  }
-
-  function clearLog() {
-    setClearedLogBaselines((current) => ({ ...current, [selectedRuntimeId]: displayedLog }));
-  }
-
   async function sendHermes() {
     if (!hasHermesBridge || isHermesThinking) return;
     const projectId = selectedProject.id;
@@ -1299,8 +1336,9 @@ function App() {
             </div>
           </section>
         ) : surface === 'hermes' ? (
-          <HermesChatView
-            projectName={selectedProject.name}
+          <div className="chat-workbench-layout">
+            <HermesChatView
+              projectName={selectedProject.name}
             projectSuggestions={selectedProject.suggestions}
             sessionName={defaultHermesSessionName}
             sessionPrompt={defaultHermesPrompt}
@@ -1397,7 +1435,9 @@ function App() {
                   }
                 : undefined
             }
-          />
+            />
+            <ChangesWorkbench projectId={selectedProject.id} projectName={selectedProject.name} />
+          </div>
         ) : surface === 'agent-session' && selectedAgentSession ? (
           <AgentSessionView
             projectName={selectedProject.name}
@@ -1412,15 +1452,13 @@ function App() {
           <ServerView
             projectName={selectedProject.name}
             projectCommand={selectedServerProject.command}
+            projectNodeVersion={selectedServerConfig?.nodeVersion ?? ''}
             projectCwd={selectedServerProject.cwd}
             projectUrl={selectedServerProject.url}
             projectSubtitle={selectedServerProject.serverSub}
             currentStatus={currentStatus}
             currentPid={runtimeSnapshot?.pid}
             branchSubtitle={branchSubtitle}
-            visibleLog={visibleLog}
-            logRef={logRef}
-            logCopied={logCopied}
             hasConfiguredServer={hasConfiguredServer}
             hasRuntimeBridge={hasRuntimeBridge}
             hasEmbeddedTerminalBridge={hasEmbeddedTerminalBridge}
@@ -1440,6 +1478,7 @@ function App() {
             canMergeBranches={canMergeBranches}
             hasBranchBridge={hasBranchBridge}
             projectTerminals={projectTerminals}
+            activeTerminalId={activeTerminalId}
             onEditServer={editSelectedServer}
             onNewServer={openNewServerModal}
             onStart={() => void startServer()}
@@ -1448,9 +1487,8 @@ function App() {
             onRunGitOperation={(action, branch) => void runGitOperation(action, branch)}
             onRequestMergeBranch={requestMergeBranch}
             onBranchFilterChange={(value) => setBranchFilters((current) => ({ ...current, [selectedRuntimeId]: value }))}
-            onCopyLog={() => void copyLog()}
-            onClearLog={clearLog}
             onOpenEmbeddedTerminal={() => void openEmbeddedTerminal()}
+            onSelectTerminal={(id) => setActiveTerminalIds((current) => ({ ...current, [selectedRuntimeId]: id }))}
             onWriteTerminal={writeEmbeddedTerminal}
             onResizeTerminal={resizeEmbeddedTerminal}
             onKillTerminal={(id) => void killEmbeddedTerminal(id)}
@@ -1558,11 +1596,14 @@ function App() {
           form={serverForm}
           workspaces={launchConfig.workspaces}
           saving={savingServer}
+          installedNodeVersions={nvmNodeVersions}
+          nodeVersionsLoading={nodeVersionsLoading}
           hasChooseDirBridge={Boolean(window.launchBay?.chooseServerDirectory)}
           onChange={setServerForm}
           onClose={() => setServerForm(undefined)}
           onChooseDirectory={() => void chooseServerDirectory()}
           onInspectDirectory={(path) => void inspectServerFormDirectory(path)}
+          onRefreshNodeVersions={() => void refreshNvmNodeVersions()}
           onSave={() => void saveServerForm()}
         />
       ) : null}

@@ -25,6 +25,7 @@ export type ServerConfig = {
   name: string;
   cwd: string;
   command: string;
+  nodeVersion?: string;
   url?: string;
   description?: string;
   createdAt: string;
@@ -41,6 +42,13 @@ export type LaunchBayConfig = {
 
 export type WorkspaceDraft = Partial<WorkspaceConfig> & Pick<WorkspaceConfig, 'name' | 'cwd'>;
 export type ServerDraft = Partial<ServerConfig> & Pick<ServerConfig, 'workspaceId' | 'name' | 'cwd'>;
+
+function normalizeNodeVersion(value: unknown): string | undefined {
+  if (typeof value !== 'string') return undefined;
+  const normalized = value.trim().replace(/^v/, '');
+  if (!normalized) return undefined;
+  return /^\d+\.\d+\.\d+$/.test(normalized) ? normalized : undefined;
+}
 
 function nowIso() {
   return new Date().toISOString();
@@ -80,11 +88,18 @@ function ensureConfigShape(value: unknown): LaunchBayConfig {
   return {
     version: 1,
     localUser: config.localUser,
-    workspaces: config.workspaces.map((workspace) => ({
-      ...workspace,
-      cwd: typeof workspace.cwd === 'string' ? workspace.cwd : config.servers.find((server) => server.workspaceId === workspace.id)?.cwd ?? ''
-    })),
-    servers: config.servers
+    workspaces: config.workspaces.map((workspace) => {
+      const savedCwd = typeof workspace.cwd === 'string' ? workspace.cwd.trim() : '';
+      const serverCwd = config.servers.find((server) => server.workspaceId === workspace.id)?.cwd?.trim() ?? '';
+      return {
+        ...workspace,
+        cwd: savedCwd || serverCwd
+      };
+    }),
+    servers: config.servers.map((server) => ({
+      ...server,
+      nodeVersion: normalizeNodeVersion(server.nodeVersion)
+    }))
   };
 }
 
@@ -166,6 +181,7 @@ export class LocalConfigStore {
       name,
       cwd,
       command: draft.command?.trim() ?? '',
+      nodeVersion: normalizeNodeVersion(draft.nodeVersion),
       url: draft.url?.trim() || undefined,
       description: draft.description?.trim() || undefined,
       createdAt: existing?.createdAt ?? draft.createdAt ?? timestamp,

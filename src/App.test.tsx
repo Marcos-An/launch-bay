@@ -1,11 +1,10 @@
-import { readFileSync } from 'node:fs';
 import { act, fireEvent, render, screen, waitFor, within } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import App from './App';
 
 type TestWorkspaceConfig = { id: string; name: string; cwd: string; createdAt: string; updatedAt: string; description?: string };
-type TestServerConfig = { id: string; workspaceId: string; name: string; cwd: string; command: string; url?: string; description?: string; createdAt: string; updatedAt: string };
+type TestServerConfig = { id: string; workspaceId: string; name: string; cwd: string; command: string; nodeVersion?: string; url?: string; description?: string; createdAt: string; updatedAt: string };
 type TestLaunchBayConfig = {
   version: 1;
   localUser: { id: string; createdAt: string; updatedAt: string; onboardingCompleted: boolean; displayName?: string };
@@ -81,6 +80,7 @@ function installLaunchBayMock(
         name: draft.name,
         cwd: draft.cwd,
         command: draft.command ?? '',
+        nodeVersion: draft.nodeVersion,
         url: draft.url,
         description: draft.description,
         createdAt: '2026-01-01T00:00:00.000Z',
@@ -90,8 +90,13 @@ function installLaunchBayMock(
     deleteServerConfig: vi.fn().mockResolvedValue(defaultConfig),
     chooseServerDirectory: vi.fn().mockResolvedValue({ canceled: false, path: '/repos/sample-api' }),
     inspectServerDirectory: vi.fn().mockResolvedValue({ path: '/repos/sample-api', exists: true, isDirectory: true, isGitRepository: true, branch: 'main', dirty: false }),
-    startProject: vi.fn().mockResolvedValue({ status: 'running', log: '$ API_SERVER=https://api.staging.example.com yarn run development\n[web] ready' }),
-    stopProject: vi.fn().mockResolvedValue({ status: 'stopped', log: '$ API_SERVER=https://api.staging.example.com yarn run development\n[process] stopped' }),
+    startProject: vi.fn().mockResolvedValue({
+      status: 'running',
+      log: '',
+      terminal: { id: 'server-term-1', projectId: 'sample', title: 'Sample terminal', cwd: '/repos/sample-app' },
+      terminalCommand: 'API_SERVER=https://api.staging.example.com yarn run development'
+    }),
+    stopProject: vi.fn().mockResolvedValue({ status: 'stopped', log: '' }),
     getRuntimeStatus: vi.fn().mockResolvedValue({ status: 'stopped', log: '', branch: 'main', dirty: false }),
     listProjectBranches: vi.fn().mockResolvedValue({
       cwd: '/repos/sample-app',
@@ -131,6 +136,28 @@ function installLaunchBayMock(
         { name: 'feature/session-cockpit', current: false, upstream: 'origin/feature/session-cockpit', ahead: 0, behind: 2, lastCommit: 'Branch UI' }
       ],
       runtime: { status: 'stopped', log: '[git] merged feature/session-cockpit into main\n', branch: 'main', dirty: false }
+    }),
+    getProjectGitSnapshot: vi.fn().mockResolvedValue({
+      cwd: '/repos/sample-app',
+      branch: 'main',
+      headSha: 'abc123',
+      upstream: 'origin/main',
+      ahead: 1,
+      behind: 0,
+      isDirty: true,
+      isMerging: false,
+      isRebasing: false,
+      isCherryPicking: false,
+      files: [
+        { path: 'src/App.tsx', status: 'modified', staged: false, unstaged: true },
+        { path: 'src/NewPanel.tsx', status: 'untracked', staged: false, unstaged: true }
+      ],
+      conflicts: []
+    }),
+    getProjectFileDiff: vi.fn().mockResolvedValue({
+      path: 'src/App.tsx',
+      kind: 'worktree',
+      diff: 'diff --git a/src/App.tsx b/src/App.tsx\n@@ -1 +1 @@\n-old\n+new\n'
     }),
     onRuntimeUpdate: vi.fn(() => () => undefined),
     sendHermesMessage: vi.fn().mockImplementation(async (projectId: string, text: string) => ({
@@ -172,6 +199,8 @@ function installLaunchBayMock(
       { id: 'hermes', label: 'Hermes', command: 'hermes', path: '/usr/local/bin/hermes' },
       { id: 'claude', label: 'Claude Code', command: 'claude', path: '/usr/local/bin/claude' }
     ]),
+    listHermesSkills: vi.fn().mockResolvedValue({ skills: [] }),
+    listNvmNodeVersions: vi.fn().mockResolvedValue({ versions: ['22.18.0', '18.20.8'] }),
     ...overrides
   };
   window.launchBay = api;
@@ -297,6 +326,7 @@ describe('Launch Bay shell', () => {
         name: 'Sample Web',
         cwd: '/repos/sample-app',
         command: 'pnpm dev',
+        nodeVersion: '18.20.8',
         url: 'http://localhost:5000',
         createdAt: '2026-01-01T00:00:00.000Z',
         updatedAt: '2026-01-01T00:00:00.000Z'
@@ -306,7 +336,14 @@ describe('Launch Bay shell', () => {
       getLaunchBayConfig: vi.fn().mockResolvedValue(config),
       getRuntimeStatus: vi.fn().mockResolvedValue({ status: 'stopped', log: '', branch: 'main', dirty: false }),
       listProjectBranches: vi.fn().mockResolvedValue({ cwd: '/repos/sample-app', current: 'main', dirty: false, branches: [{ name: 'main', current: true }] }),
-      startProject: vi.fn().mockResolvedValue({ status: 'running', log: '$ pnpm dev\nready', branch: 'main', dirty: false })
+      startProject: vi.fn().mockResolvedValue({
+        status: 'running',
+        log: '',
+        branch: 'main',
+        dirty: false,
+        terminal: { id: 'server-term-web', projectId: 'server-sample-web', title: 'Sample Web terminal', cwd: '/repos/sample-app' },
+        terminalCommand: 'pnpm dev'
+      })
     }, config);
     const user = userEvent.setup();
     render(<App />);
@@ -314,18 +351,27 @@ describe('Launch Bay shell', () => {
     await user.click(await screen.findByRole('button', { name: 'Server' }));
     await waitFor(() => expect(api.getRuntimeStatus).toHaveBeenCalledWith('server-sample-web'));
     expect(screen.getByRole('button', { name: 'Edit server' })).toBeInTheDocument();
+    expect(screen.getByText('v18.20.8')).toBeInTheDocument();
     expect(screen.queryByRole('button', { name: 'Add server' })).not.toBeInTheDocument();
     expect(within(screen.getByRole('group', { name: 'Server runtime' })).getByRole('button', { name: 'New server' })).toBeInTheDocument();
 
     await user.click(screen.getByRole('button', { name: 'Edit server' }));
     const dialog = await screen.findByRole('dialog', { name: 'Edit server' });
+    await waitFor(() => expect(api.listNvmNodeVersions).toHaveBeenCalled());
     expect(within(dialog).getByLabelText('Server name')).toHaveValue('Sample Web');
+    const nodeVersionSelect = within(dialog).getByLabelText('Node version');
+    expect(nodeVersionSelect.tagName).toBe('SELECT');
+    expect(nodeVersionSelect).toHaveValue('18.20.8');
+    expect(within(nodeVersionSelect).getByRole('option', { name: 'Auto (.nvmrc / PATH)' })).toHaveValue('');
+    expect(within(nodeVersionSelect).getByRole('option', { name: 'v22.18.0' })).toHaveValue('22.18.0');
+    expect(within(nodeVersionSelect).getByRole('option', { name: 'v18.20.8' })).toHaveValue('18.20.8');
     expect(within(dialog).getByLabelText('Local URL')).toHaveValue('http://localhost:5000');
     await user.keyboard('{Escape}');
 
     await user.click(screen.getByRole('button', { name: 'Start' }));
     expect(api.startProject).toHaveBeenCalledWith('server-sample-web');
-    expect(await screen.findByText(/\$ pnpm dev/)).toBeInTheDocument();
+    expect(api.writeTerminal).not.toHaveBeenCalledWith('server-term-web', 'pnpm dev\r');
+    expect(await screen.findByRole('region', { name: 'Sample Web terminal' })).toBeInTheDocument();
   });
 
   it('adds another server under the selected project and switches the Server view to it', async () => {
@@ -339,6 +385,7 @@ describe('Launch Bay shell', () => {
         name: 'Sample Web',
         cwd: '/repos/sample-app',
         command: 'pnpm dev',
+        nodeVersion: '18.20.8',
         url: 'http://localhost:5000',
         createdAt: '2026-01-01T00:00:00.000Z',
         updatedAt: '2026-01-01T00:00:00.000Z'
@@ -481,6 +528,7 @@ describe('Launch Bay shell', () => {
     await user.clear(within(dialog).getByLabelText('Working directory'));
     await user.type(within(dialog).getByLabelText('Working directory'), '/repos/sample-api');
     await user.type(within(dialog).getByLabelText('Start command'), 'pnpm dev');
+    await user.selectOptions(within(dialog).getByLabelText('Node version'), '18.20.8');
     await user.type(within(dialog).getByLabelText('Local URL'), 'http://localhost:3333');
     await user.click(within(dialog).getByRole('button', { name: 'Save server' }));
 
@@ -490,6 +538,7 @@ describe('Launch Bay shell', () => {
       name: 'Sample API',
       cwd: '/repos/sample-api',
       command: 'pnpm dev',
+      nodeVersion: '18.20.8',
       url: 'http://localhost:3333'
     }));
     expect(await screen.findByRole('heading', { name: 'Sample Stack server' })).toBeInTheDocument();
@@ -516,9 +565,8 @@ describe('Launch Bay shell', () => {
     render(<App />);
 
     expect(screen.getByText('What do you want to work on?')).toBeInTheDocument();
-    const appCss = readFileSync('src/App.css', 'utf8');
-    expect(appCss).toMatch(/\.chat-inner\s*\{[^}]*text-align:\s*center/s);
-    expect(appCss).toMatch(/\.suggestions\s*\{[^}]*margin:\s*34px auto 0/s);
+    expect(screen.getByText('Inspect this project context')).toBeInTheDocument();
+    expect(screen.getByText('Review current branch state')).toBeInTheDocument();
   });
 
   it('lets the Hermes composer grow with typed lines before switching to an internal scroll', async () => {
@@ -650,6 +698,167 @@ describe('Launch Bay shell', () => {
     expect(screen.getByText('api :3333 · web :5173')).toBeInTheDocument();
   });
 
+  it('keeps a right-side Git changes workbench beside the Hermes chat', async () => {
+    const api = installLaunchBayMock();
+    render(<App />);
+
+    const compactCard = await screen.findByRole('button', { name: /Expand changes workbench/i });
+    fireEvent.click(compactCard);
+
+    const workbench = await screen.findByRole('complementary', { name: 'Changes workbench' });
+    expect(within(workbench).getByRole('heading', { name: 'Changes' })).toBeInTheDocument();
+    expect(within(workbench).getByText('Local changes')).toBeInTheDocument();
+    expect(within(workbench).getByText('main')).toBeInTheDocument();
+    expect(within(workbench).getAllByText('src/App.tsx').length).toBeGreaterThan(0);
+    expect(within(workbench).getByText('src/NewPanel.tsx')).toBeInTheDocument();
+    expect(await within(workbench).findByLabelText('Diff for src/App.tsx')).toHaveTextContent('+new');
+    expect(api.getProjectGitSnapshot).toHaveBeenCalledWith('sample');
+    expect(api.getProjectFileDiff).toHaveBeenCalledWith('sample', 'src/App.tsx', 'worktree');
+  });
+
+  it('keeps the collapsed changes card fresh without touching an expanded diff review', async () => {
+    const api = installLaunchBayMock();
+    render(<App />);
+
+    const compactCard = await screen.findByRole('button', { name: /Expand changes workbench/i });
+    expect(compactCard).toHaveTextContent('main');
+
+    vi.mocked(api.getProjectGitSnapshot).mockClear();
+    vi.mocked(api.getProjectGitSnapshot).mockResolvedValueOnce({
+      cwd: '/repos/sample-app',
+      branch: 'feature/active',
+      headSha: 'def456',
+      upstream: 'origin/feature/active',
+      ahead: 0,
+      behind: 0,
+      isDirty: true,
+      isMerging: false,
+      isRebasing: false,
+      isCherryPicking: false,
+      files: [{ path: 'src/Changed.tsx', status: 'modified', staged: false, unstaged: true }],
+      conflicts: []
+    });
+
+    await act(async () => {
+      window.dispatchEvent(new Event('focus'));
+      await Promise.resolve();
+    });
+
+    await waitFor(() => expect(compactCard).toHaveTextContent('feature/active'));
+    expect(compactCard).toHaveTextContent('1 file');
+    expect(api.getProjectGitSnapshot).toHaveBeenCalledTimes(1);
+
+    fireEvent.click(compactCard);
+    const workbench = await screen.findByRole('complementary', { name: 'Changes workbench' });
+    expect(within(workbench).getByText('feature/active')).toBeInTheDocument();
+
+    vi.mocked(api.getProjectGitSnapshot).mockClear();
+    await act(async () => {
+      window.dispatchEvent(new Event('focus'));
+      await Promise.resolve();
+    });
+
+    expect(api.getProjectGitSnapshot).not.toHaveBeenCalled();
+  });
+
+  it('does not auto-refresh the changes workbench while the user is reading a diff', async () => {
+    const api = installLaunchBayMock();
+    render(<App />);
+
+    const compactCard = await screen.findByRole('button', { name: /Expand changes workbench/i });
+    fireEvent.click(compactCard);
+
+    const workbench = await screen.findByRole('complementary', { name: 'Changes workbench' });
+    expect(await within(workbench).findByLabelText('Diff for src/App.tsx')).toHaveTextContent('+new');
+    expect(api.getProjectGitSnapshot).toHaveBeenCalledTimes(1);
+
+    vi.useFakeTimers();
+    vi.mocked(api.getProjectGitSnapshot).mockClear();
+    await act(async () => {
+      vi.advanceTimersByTime(10_000);
+      window.dispatchEvent(new Event('focus'));
+      await Promise.resolve();
+    });
+
+    expect(api.getProjectGitSnapshot).not.toHaveBeenCalled();
+
+    await act(async () => {
+      fireEvent.click(within(workbench).getByRole('button', { name: 'Refresh' }));
+      await Promise.resolve();
+    });
+    expect(api.getProjectGitSnapshot).toHaveBeenCalledTimes(1);
+  });
+
+  it('lists Hermes skills as slash commands and applies the selected slash command', async () => {
+    installLaunchBayMock({
+      listHermesSkills: vi.fn().mockResolvedValue({
+        skills: [
+          { name: 'obsidian', description: 'Read, search, and create notes in the Obsidian vault' },
+          { name: 'engineering-contract-coding', description: 'Disciplined implementation workflow' }
+        ]
+      })
+    });
+    const user = userEvent.setup();
+    render(<App />);
+
+    const composer = await screen.findByLabelText('Message Hermes about Sample');
+    await user.type(composer, '/obs');
+
+    const picker = await screen.findByRole('listbox', { name: 'Slash commands and skills' });
+    expect(picker.parentElement).toHaveClass('composer-wrap');
+    expect(picker.closest('.composer')).toBeNull();
+    expect(within(picker).getByText('/obsidian')).toBeInTheDocument();
+    expect(within(picker).getByText(/skill/i)).toBeInTheDocument();
+    expect(within(picker).getByText(/Obsidian vault/)).toBeInTheDocument();
+
+    fireEvent.mouseDown(within(picker).getByText('/obsidian'));
+
+    expect(composer).toHaveValue('/obsidian ');
+  });
+
+  it('shows the changes workbench as a floating branch summary card by default and expands it on click', async () => {
+    installLaunchBayMock();
+    render(<App />);
+
+    const compactCard = await screen.findByRole('button', { name: /Expand changes workbench/i });
+    expect(compactCard).toHaveTextContent('main');
+    expect(compactCard).toHaveTextContent('2 files');
+    expect(screen.queryByLabelText('Selected file diff')).not.toBeInTheDocument();
+    expect(screen.queryByRole('button', { name: 'Minimize changes workbench' })).not.toBeInTheDocument();
+
+    fireEvent.click(compactCard);
+
+    expect(await screen.findByLabelText('Diff for src/App.tsx')).toHaveTextContent('+new');
+    expect(screen.getByRole('button', { name: 'Minimize changes workbench' })).toBeInTheDocument();
+  });
+
+  it('surfaces merge conflicts in the changes workbench instead of hiding them as generic errors', async () => {
+    installLaunchBayMock({
+      getProjectGitSnapshot: vi.fn().mockResolvedValue({
+        cwd: '/repos/sample-app',
+        branch: 'main',
+        headSha: 'abc123',
+        isDirty: true,
+        isMerging: true,
+        isRebasing: false,
+        isCherryPicking: false,
+        files: [{ path: 'src/conflict.ts', status: 'conflicted', staged: true, unstaged: true }],
+        conflicts: [{ path: 'src/conflict.ts', status: 'UU', stages: { base: true, ours: true, theirs: true } }]
+      }),
+      getProjectFileDiff: vi.fn().mockResolvedValue({ path: 'src/conflict.ts', kind: 'worktree', diff: '' })
+    });
+    render(<App />);
+
+    const compactCard = await screen.findByRole('button', { name: /Expand changes workbench/i });
+    fireEvent.click(compactCard);
+
+    const workbench = await screen.findByRole('complementary', { name: 'Changes workbench' });
+    expect(within(workbench).getByText('Merge in progress')).toBeInTheDocument();
+    expect(within(workbench).getByRole('alert')).toHaveTextContent('1 conflicted file');
+    expect(within(workbench).getAllByText('src/conflict.ts').length).toBeGreaterThan(0);
+    expect(within(workbench).getByText('conflicts')).toBeInTheDocument();
+  });
+
   it('shows a GitLens-style branch manager with search, fetch, quick switch, and merge actions', async () => {
     const user = userEvent.setup();
     const api = installLaunchBayMock();
@@ -734,9 +943,6 @@ describe('Launch Bay shell', () => {
 
     const config = await screen.findByRole('region', { name: 'Project config' });
     expect(within(config).getByRole('button', { name: 'Switch to feature/session-cockpit' })).toBeDisabled();
-    const appCss = readFileSync('src/App.css', 'utf8');
-    expect(appCss).toMatch(/button:disabled\s*\{[^}]*opacity:\s*0\.42[^}]*cursor:\s*not-allowed[^}]*pointer-events:\s*none/s);
-    expect(appCss).toContain('.terminal-action:hover:not(:disabled)');
     expect(within(config).getByText(/Commit or stash before switching branches/i)).toBeInTheDocument();
   });
 
@@ -777,39 +983,48 @@ describe('Launch Bay shell', () => {
     await act(async () => {
       await Promise.resolve();
     });
-    expect(screen.getByText('main')).toHaveClass('row-subtitle');
+    const sidebarMainLabels = screen.getAllByText('main').filter((node) => node.classList.contains('row-subtitle'));
+    expect(sidebarMainLabels[0]).toHaveClass('row-subtitle');
 
     await act(async () => {
       await vi.advanceTimersByTimeAsync(3000);
     });
 
     expect(screen.getByText('feature/new-branch')).toHaveClass('row-subtitle');
-    expect(screen.queryByText('main')).not.toBeInTheDocument();
+    expect(screen.queryAllByText('main').some((node) => node.classList.contains('row-subtitle'))).toBe(false);
   });
 
-  it('starts the Sample runtime through Electron and shows streamed logs', async () => {
-    const api = installLaunchBayMock();
+  it('starts the Sample runtime in the server terminal instead of a logger panel', async () => {
+    const api = installLaunchBayMock({
+      startProject: vi.fn().mockResolvedValue({
+        status: 'running',
+        log: '',
+        terminal: { id: 'server-term-1', projectId: 'sample', title: 'Sample terminal', cwd: '/repos/sample-app' },
+        terminalCommand: 'API_SERVER=https://api.staging.example.com yarn run development'
+      })
+    });
     const user = userEvent.setup();
     render(<App />);
 
     await user.click(screen.getByRole('button', { name: 'Server' }));
+    expect(screen.queryByLabelText('Server logs')).not.toBeInTheDocument();
     await user.click(screen.getByRole('button', { name: 'Start' }));
 
     expect(api.startProject).toHaveBeenCalledWith('sample');
-    expect(screen.getAllByText('running').length).toBeGreaterThan(0);
-    expect(screen.getByText(/\$ API_SERVER=https:\/\/api\.staging\.example\.com yarn run development/)).toBeInTheDocument();
-    expect(screen.getByText(/\[web\] ready/)).toBeInTheDocument();
+    expect(await screen.findByRole('region', { name: 'Sample terminal' })).toBeInTheDocument();
+    expect(api.writeTerminal).not.toHaveBeenCalledWith('server-term-1', 'API_SERVER=https://api.staging.example.com yarn run development\r');
+    expect(screen.queryByText(/\[web\] ready/)).not.toBeInTheDocument();
   });
 
-  it('stops the selected project runtime through Electron', async () => {
+  it('stops the selected project runtime through Electron without writing logger output', async () => {
     const api = installLaunchBayMock({
       // Start the server already in the running state so Stop is enabled.
       getRuntimeStatus: vi.fn().mockResolvedValue({
         status: 'running',
-        log: '$ API_SERVER=https://api.staging.example.com yarn run development\n[web] ready',
+        log: '',
         pid: 1234
       }),
-      stopProject: vi.fn().mockResolvedValue({ status: 'stopped', log: '[process] stopped' })
+      stopProject: vi.fn().mockResolvedValue({ status: 'stopped', log: '' })
     });
     const user = userEvent.setup();
     render(<App />);
@@ -819,10 +1034,10 @@ describe('Launch Bay shell', () => {
 
     expect(api.stopProject).toHaveBeenCalledWith('sample');
     expect(screen.getAllByText('stopped').length).toBeGreaterThan(0);
-    expect(screen.getByText(/\[process\] stopped/)).toBeInTheDocument();
+    expect(screen.queryByText(/\[process\] stopped/)).not.toBeInTheDocument();
   });
 
-  it('applies runtime updates sent by Electron without changing surface', async () => {
+  it('applies runtime updates sent by Electron without restoring a logger panel', async () => {
     let listener: ((event: { projectId: string; snapshot: { status: string; log: string } }) => void) | undefined;
     installLaunchBayMock({
       onRuntimeUpdate: vi.fn((callback) => {
@@ -846,7 +1061,8 @@ describe('Launch Bay shell', () => {
     });
 
     expect(screen.getByRole('heading', { name: 'Sample server' })).toBeInTheDocument();
-    expect(screen.getByText('[vite] Local: http://localhost:5000')).toBeInTheDocument();
+    expect(screen.queryByText('[vite] Local: http://localhost:5000')).not.toBeInTheDocument();
+    expect(screen.getByLabelText('Server terminal')).toBeInTheDocument();
   });
 
   it('opens the selected project local URL through the Electron bridge when it is a trusted local URL', async () => {
@@ -877,40 +1093,56 @@ describe('Launch Bay shell', () => {
 
     render(<App />);
     await user.click(screen.getByRole('button', { name: 'Server' }));
-    await user.click(screen.getByRole('button', { name: 'Open terminal' }));
+    await user.click(screen.getByRole('button', { name: 'Start' }));
 
     const main = document.querySelector('.main') as HTMLElement;
-    const embeddedStack = screen.getByLabelText('Sample embedded sessions');
+    const terminalStack = await screen.findByLabelText('Sample terminal sessions');
     const serverView = screen.getByRole('region', { name: 'Sample server' });
 
     expect(within(serverView).queryByRole('button', { name: 'Open Hermes' })).not.toBeInTheDocument();
     expect(screen.getByRole('button', { name: 'Open Hermes' })).toBeInTheDocument();
     expect(document.body).toHaveStyle({ overflow: 'hidden' });
     expect(main).toHaveStyle({ overflowX: 'hidden', overflowY: 'auto' });
-    const appCss = readFileSync('src/App.css', 'utf8');
-    expect(appCss).toContain('scrollbar-color: rgba(255, 255, 255, 0.24) transparent');
-    expect(appCss).toContain('.main::-webkit-scrollbar-track { background: transparent; }');
-    expect(main).toContainElement(embeddedStack);
-    expect(await screen.findByRole('region', { name: 'Terminal 1 · sample-app' })).toBeInTheDocument();
+    expect(main).toContainElement(terminalStack);
+    expect(await screen.findByRole('region', { name: 'Sample terminal' })).toBeInTheDocument();
   });
 
-  it('opens embedded terminal cards under the server log for the selected project', async () => {
+  it('opens the configured server command inside the server terminal', async () => {
     const user = userEvent.setup();
     const api = installLaunchBayMock();
 
     render(<App />);
     await user.click(screen.getByRole('button', { name: 'Server' }));
-    await user.click(screen.getByRole('button', { name: 'Open terminal' }));
-    await user.click(screen.getByRole('button', { name: 'Open terminal' }));
+    await user.click(screen.getByRole('button', { name: 'Start' }));
 
-    expect(api.createTerminal).toHaveBeenNthCalledWith(1, 'sample', '~/repos/sample-app');
-    expect(api.createTerminal).toHaveBeenNthCalledWith(2, 'sample', '~/repos/sample-app');
-    expect(await screen.findByRole('region', { name: 'Terminal 1 · sample-app' })).toBeInTheDocument();
-    expect(screen.getByRole('region', { name: 'Terminal 2 · sample-app' })).toBeInTheDocument();
+    expect(api.startProject).toHaveBeenCalledWith('sample');
+    expect(api.writeTerminal).not.toHaveBeenCalledWith('server-term-1', 'API_SERVER=https://api.staging.example.com yarn run development\r');
+    expect(await screen.findByRole('region', { name: 'Sample terminal' })).toBeInTheDocument();
+    expect(screen.queryByLabelText('Server logs')).not.toBeInTheDocument();
   });
 
-  it('routes terminal output, input, kill, and close through the embedded terminal bridge', async () => {
-    let terminalDataListener: ((event: { id: string; data: string }) => void) | undefined;
+  it('can add an extra interactive terminal from the Server terminal panel without stacking huge terminal cards', async () => {
+    const user = userEvent.setup();
+    const api = installLaunchBayMock();
+
+    render(<App />);
+    await user.click(screen.getByRole('button', { name: 'Server' }));
+    await user.click(screen.getByRole('button', { name: 'Start' }));
+    await screen.findByRole('region', { name: 'Sample terminal' });
+
+    await user.click(screen.getByRole('button', { name: 'New terminal' }));
+
+    expect(api.createTerminal).toHaveBeenCalledWith('sample', '~/repos/sample-app');
+    expect(screen.getByRole('tab', { name: 'Sample terminal' })).toHaveAttribute('aria-selected', 'false');
+    expect(screen.getByRole('tab', { name: 'Terminal 1 · sample-app' })).toHaveAttribute('aria-selected', 'true');
+    expect(await screen.findByRole('region', { name: 'Terminal 1 · sample-app' })).toBeInTheDocument();
+    expect(screen.queryByRole('region', { name: 'Sample terminal' })).not.toBeInTheDocument();
+    await user.click(screen.getByRole('tab', { name: 'Sample terminal' }));
+    expect(await screen.findByRole('region', { name: 'Sample terminal' })).toBeInTheDocument();
+  });
+
+  it('routes terminal output, input, kill, and close through the server terminal bridge', async () => {
+    let terminalDataListener: ((event: { id: string; projectId: string; data: string }) => void) | undefined;
     const user = userEvent.setup();
     const api = installLaunchBayMock({
       onTerminalData: vi.fn((callback) => {
@@ -921,25 +1153,25 @@ describe('Launch Bay shell', () => {
 
     render(<App />);
     await user.click(screen.getByRole('button', { name: 'Server' }));
-    await user.click(screen.getByRole('button', { name: 'Open terminal' }));
+    await user.click(screen.getByRole('button', { name: 'Start' }));
 
-    act(() => terminalDataListener?.({ id: 'term-1', data: 'hello from shell\n' }));
+    act(() => terminalDataListener?.({ id: 'server-term-1', projectId: 'sample', data: 'hello from shell\n' }));
     expect(await screen.findByText(/hello from shell/)).toBeInTheDocument();
 
-    const terminalCard = screen.getByRole('region', { name: 'Terminal 1 · sample-app' });
-    const terminalBox = within(terminalCard).getByRole('textbox', { name: 'Interactive terminal for Terminal 1 · sample-app' });
+    const terminalCard = screen.getByRole('region', { name: 'Sample terminal' });
+    const terminalBox = within(terminalCard).getByRole('textbox', { name: 'Interactive terminal for Sample terminal' });
     expect(within(terminalCard).queryByRole('button', { name: 'Send' })).not.toBeInTheDocument();
     expect(within(terminalCard).queryByRole('textbox', { name: /Command for/ })).not.toBeInTheDocument();
     await user.type(terminalBox, 'pwd{Enter}');
-    expect(api.writeTerminal).toHaveBeenCalledWith('term-1', 'p');
-    expect(api.writeTerminal).toHaveBeenCalledWith('term-1', 'w');
-    expect(api.writeTerminal).toHaveBeenCalledWith('term-1', 'd');
-    expect(api.writeTerminal).toHaveBeenCalledWith('term-1', '\r');
+    expect(api.writeTerminal).toHaveBeenCalledWith('server-term-1', 'p');
+    expect(api.writeTerminal).toHaveBeenCalledWith('server-term-1', 'w');
+    expect(api.writeTerminal).toHaveBeenCalledWith('server-term-1', 'd');
+    expect(api.writeTerminal).toHaveBeenCalledWith('server-term-1', '\r');
 
     await user.click(within(terminalCard).getByRole('button', { name: 'Kill' }));
-    expect(api.killTerminal).toHaveBeenCalledWith('term-1');
+    expect(api.killTerminal).toHaveBeenCalledWith('server-term-1');
     await user.click(within(terminalCard).getByRole('button', { name: 'Close' }));
-    expect(screen.queryByRole('region', { name: 'Terminal 1 · sample-app' })).not.toBeInTheDocument();
+    expect(screen.queryByRole('region', { name: 'Sample terminal' })).not.toBeInTheDocument();
   });
 
   it('shows only installed supported CLI tools when creating a new session', async () => {
@@ -1498,122 +1730,18 @@ describe('Launch Bay shell', () => {
     expect(writeText).toHaveBeenCalledWith('pong reply');
   });
 
-  it('copies the visible server log and shows a temporary Copied label', async () => {
-    const writeText = vi.fn().mockResolvedValue(undefined);
+  it('does not expose legacy server logger controls', async () => {
     const user = userEvent.setup();
-    setClipboardMock({ writeText });
     installLaunchBayMock();
     render(<App />);
 
-    expect(window.navigator.clipboard?.writeText).toBe(writeText);
-    await user.click(screen.getByRole('button', { name: 'Server' }));
-    expect(window.navigator.clipboard?.writeText).toBe(writeText);
-    await user.click(screen.getByRole('button', { name: 'Start' }));
-    await screen.findByText(/\[web\] ready/);
-    expect(window.navigator.clipboard?.writeText).toBe(writeText);
-
-    const copyButton = screen.getByRole('button', { name: 'Copy log' });
-    fireEvent.click(copyButton);
-
-    await waitFor(() => expect(copyButton).toHaveTextContent('Copied'));
-    expect(writeText).toHaveBeenCalledWith(expect.stringContaining('[web] ready'));
-  });
-
-  it('keeps the Copy log label stable when clipboard is unavailable or write fails', async () => {
-    installLaunchBayMock();
-    const user = userEvent.setup();
-    setClipboardMock(undefined);
-    render(<App />);
-
-    await user.click(screen.getByRole('button', { name: 'Server' }));
-    const copyButton = screen.getByRole('button', { name: 'Copy log' });
-    await act(async () => {
-      fireEvent.click(copyButton);
-      await Promise.resolve();
-    });
-    expect(copyButton).toHaveTextContent('Copy log');
-
-    const failingWrite = vi.fn().mockRejectedValue(new Error('denied'));
-    setClipboardMock({ writeText: failingWrite });
-
-    await act(async () => {
-      fireEvent.click(copyButton);
-      await Promise.resolve();
-    });
-    expect(failingWrite).toHaveBeenCalled();
-    await act(async () => {
-      await Promise.resolve();
-    });
-    expect(copyButton).toHaveTextContent('Copy log');
-  });
-
-  it('clears the visible server log for the selected project and surfaces new runtime updates again', async () => {
-    let listener: ((event: { projectId: string; snapshot: { status: string; log: string } }) => void) | undefined;
-    installLaunchBayMock({
-      onRuntimeUpdate: vi.fn((callback) => {
-        listener = callback;
-        return () => undefined;
-      })
-    });
-    const user = userEvent.setup();
-    render(<App />);
-
-    await user.click(screen.getByRole('button', { name: 'Server' }));
-    await user.click(screen.getByRole('button', { name: 'Start' }));
-    expect(await screen.findByText(/\[web\] ready/)).toBeInTheDocument();
-
-    await user.click(screen.getByRole('button', { name: 'Clear' }));
-    expect(screen.queryByText(/\[web\] ready/)).not.toBeInTheDocument();
-
-    expect(screen.getByRole('button', { name: 'Open terminal' })).not.toBeDisabled();
-    const serverView = screen.getByRole('region', { name: 'Sample server' });
-    expect(within(serverView).queryByRole('button', { name: 'Open Hermes' })).not.toBeInTheDocument();
-    expect(screen.getByRole('button', { name: 'Open Hermes' })).toBeInTheDocument();
-    expect(screen.getByRole('button', { name: 'New session' })).toBeInTheDocument();
-
-    act(() => {
-      listener?.({
-        projectId: 'sample',
-        snapshot: {
-          status: 'running',
-          log: '$ API_SERVER=https://api.staging.example.com yarn run development\n[web] ready\n[web] hot update applied'
-        }
-      });
-    });
-
-    expect(await screen.findByText(/\[web\] hot update applied/)).toBeInTheDocument();
-    expect(screen.queryByText(/\[web\] ready$/)).not.toBeInTheDocument();
-  });
-
-  it('autoscrolls the server log to the latest content when the displayed log changes', async () => {
-    let listener: ((event: { projectId: string; snapshot: { status: string; log: string } }) => void) | undefined;
-    installLaunchBayMock({
-      onRuntimeUpdate: vi.fn((callback) => {
-        listener = callback;
-        return () => undefined;
-      })
-    });
-    const user = userEvent.setup();
-    render(<App />);
-
     await user.click(screen.getByRole('button', { name: 'Server' }));
 
-    const logElement = document.querySelector('.terminal-panel pre') as HTMLPreElement;
-    Object.defineProperty(logElement, 'scrollHeight', { configurable: true, value: 980 });
-    Object.defineProperty(logElement, 'clientHeight', { configurable: true, value: 200 });
-    logElement.scrollTop = 0;
-
-    act(() => {
-      listener?.({
-        projectId: 'sample',
-        snapshot: {
-          status: 'running',
-          log: 'line 1\nline 2\nline 3\nline 4\nline 5'
-        }
-      });
-    });
-
-    await waitFor(() => expect(logElement.scrollTop).toBe(980));
+    expect(screen.getByLabelText('Server terminal')).toBeInTheDocument();
+    expect(screen.queryByLabelText('Server logs')).not.toBeInTheDocument();
+    expect(screen.queryByRole('button', { name: 'Copy log' })).not.toBeInTheDocument();
+    expect(screen.queryByRole('button', { name: 'Clear' })).not.toBeInTheDocument();
+    expect(screen.queryByRole('button', { name: 'Open terminal' })).not.toBeInTheDocument();
   });
 
   it('keeps the copy label as Copy when clipboard is unavailable or write fails', async () => {

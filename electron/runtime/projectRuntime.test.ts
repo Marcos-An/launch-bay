@@ -1,9 +1,10 @@
 // @vitest-environment node
 import { EventEmitter } from 'node:events';
-import { homedir } from 'node:os';
+import { mkdirSync, mkdtempSync, rmSync } from 'node:fs';
+import { tmpdir, homedir } from 'node:os';
 import { join } from 'node:path';
 import { describe, expect, it, vi } from 'vitest';
-import { ProjectRuntimeManager, createProjectRuntimeConfig, type RuntimeUpdate } from './projectRuntime.js';
+import { ProjectRuntimeManager, createProjectRuntimeConfig, listInstalledNvmNodeVersions, type RuntimeUpdate } from './projectRuntime.js';
 
 class FakeChild extends EventEmitter {
   stdout = new EventEmitter();
@@ -12,6 +13,15 @@ class FakeChild extends EventEmitter {
 }
 
 const noNodePin = () => undefined;
+
+function withTempNvmVersions(callback: (versionsDir: string) => void) {
+  const root = mkdtempSync(join(tmpdir(), 'launch-bay-nvm-'));
+  try {
+    callback(root);
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+}
 
 // Shared per-test sample config so individual cases stay focused.
 function sampleConfigs() {
@@ -28,6 +38,23 @@ function sampleConfigs() {
 }
 
 describe('ProjectRuntimeManager', () => {
+  it('lists only installed NVM Node versions for server selection', () => {
+    withTempNvmVersions((versionsDir) => {
+      mkdirSync(join(versionsDir, 'v18.20.8', 'bin'), { recursive: true });
+      mkdirSync(join(versionsDir, 'v22.18.0', 'bin'), { recursive: true });
+      mkdirSync(join(versionsDir, 'v22.22.2', 'bin'), { recursive: true });
+      mkdirSync(join(versionsDir, 'v22.18'), { recursive: true });
+      mkdirSync(join(versionsDir, 'not-node', 'bin'), { recursive: true });
+
+      expect(listInstalledNvmNodeVersions(versionsDir)).toEqual(['22.22.2', '22.18.0', '18.20.8']);
+    });
+  });
+
+  it('does not persist partial Node versions as an explicit runtime pin', () => {
+    expect(createProjectRuntimeConfig({ id: 'sample', cwd: '/repos/sample-app', command: 'pnpm dev', nodeVersion: '22.18' }).nodeVersion).toBeUndefined();
+    expect(createProjectRuntimeConfig({ id: 'sample', cwd: '/repos/sample-app', command: 'pnpm dev', nodeVersion: 'v22.18.0' }).nodeVersion).toBe('22.18.0');
+  });
+
   it('starts dynamic local server configs independently through the login shell', async () => {
     const child = new FakeChild();
     const spawnProcess = vi.fn(() => child as never);
@@ -96,6 +123,98 @@ describe('ProjectRuntimeManager', () => {
 
     child.stdout.emit('data', Buffer.from('[web] ready on http://localhost:5000\n'));
     expect(events.at(-1)?.snapshot.log).toContain('[web] ready on http://localhost:5000');
+  });
+
+  it('does not leak Launch Bay/Electron package-manager env into server processes', async () => {
+    const previousEnv = {
+      NODE_ENV: process.env.NODE_ENV,
+      NODE_OPTIONS: process.env.NODE_OPTIONS,
+      npm_lifecycle_event: process.env.npm_lifecycle_event,
+      npm_package_json: process.env.npm_package_json,
+      INIT_CWD: process.env.INIT_CWD,
+      PATH: process.env.PATH
+    };
+    process.env.NODE_ENV = 'production';
+    process.env.NODE_OPTIONS = '--max-old-space-size=8192 --expose-gc';
+    process.env.npm_lifecycle_event = 'dev';
+    process.env.npm_package_json = '/Users/marcos/Documents/launch-bay/package.json';
+    process.env.INIT_CWD = '/Users/marcos/Documents/launch-bay';
+    process.env.PATH = '/Users/marcos/Documents/launch-bay/node_modules/.bin:/snapshot/dist/node-gyp-bin:/usr/bin:/bin';
+
+    try {
+      const child = new FakeChild();
+      const spawnProcess = vi.fn(() => child as never);
+      const manager = new ProjectRuntimeManager(
+        sampleConfigs(),
+        spawnProcess,
+        vi.fn(() => ({ version: '22.18.0', binPath: '/fake/nvm/v22.18.0/bin' }))
+      );
+
+      await manager.start('sample');
+      const env = spawnProcess.mock.calls[0]?.[2]?.env as NodeJS.ProcessEnv;
+
+      expect(env.API_SERVER).toBe('https://api.example.com');
+      expect(env.NODE_ENV).toBeUndefined();
+      expect(env.NODE_OPTIONS).toBeUndefined();
+      expect(env.npm_lifecycle_event).toBeUndefined();
+      expect(env.npm_package_json).toBeUndefined();
+      expect(env.INIT_CWD).toBeUndefined();
+      expect(env.PATH).toBe('/fake/nvm/v22.18.0/bin:/usr/bin:/bin');
+    } finally {
+      for (const [key, value] of Object.entries(previousEnv)) {
+        if (value === undefined) delete process.env[key];
+        else process.env[key] = value;
+      }
+    }
+  });
+
+  it('prefers a configured Node version over the project .nvmrc when starting', async () => {
+    const child = new FakeChild();
+    const spawnProcess = vi.fn(() => child as never);
+    const resolveNodeBin = vi.fn((_cwd: string, preferredVersion?: string) => ({
+      version: preferredVersion ?? '22.18.0',
+      binPath: '/Users/marcos/.nvm/versions/node/v18.20.8/bin'
+    }));
+    const manager = new ProjectRuntimeManager(
+      [createProjectRuntimeConfig({ id: 'sample', cwd: '/repos/sample-app', command: 'yarn run development', nodeVersion: '18.20.8' })],
+      spawnProcess,
+      resolveNodeBin,
+      vi.fn(() => 'main'),
+      vi.fn(() => false)
+    );
+
+    const snapshot = await manager.start('sample');
+
+    expect(snapshot.status).toBe('running');
+    expect(snapshot.log).toContain('[runtime] Node v18.20.8 (/Users/marcos/.nvm/versions/node/v18.20.8/bin)');
+    expect(resolveNodeBin).toHaveBeenCalledWith('/repos/sample-app', '18.20.8');
+    expect(spawnProcess).toHaveBeenCalledWith(
+      expect.any(String),
+      expect.any(Array),
+      expect.objectContaining({
+        env: expect.objectContaining({
+          PATH: expect.stringMatching(/^\/Users\/marcos\/\.nvm\/versions\/node\/v18\.20\.8\/bin:/)
+        })
+      })
+    );
+  });
+
+  it('does not start when the configured Node version is not installed', async () => {
+    const spawnProcess = vi.fn();
+    const manager = new ProjectRuntimeManager(
+      [createProjectRuntimeConfig({ id: 'sample', cwd: '/repos/sample-app', command: 'yarn run development', nodeVersion: '20.19.0' })],
+      spawnProcess as never,
+      vi.fn(() => ({ version: '20.19.0', error: 'Node v20.19.0 is not installed.' })),
+      vi.fn(() => 'main'),
+      vi.fn(() => false)
+    );
+
+    const snapshot = await manager.start('sample');
+
+    expect(spawnProcess).not.toHaveBeenCalled();
+    expect(snapshot.status).toBe('stopped');
+    expect(snapshot.error).toBe('Node v20.19.0 is not installed.');
+    expect(snapshot.log).toContain('[runtime] Node v20.19.0 is not installed.');
   });
 
   it('includes the active git branch in runtime snapshots', () => {
@@ -263,7 +382,7 @@ describe('ProjectRuntimeManager', () => {
 
     const snapshot = await manager.start('sample');
 
-    expect(resolveNodeBin).toHaveBeenCalledWith(join(homedir(), 'Documents/sample-app'));
+    expect(resolveNodeBin).toHaveBeenCalledWith(join(homedir(), 'Documents/sample-app'), undefined);
     expect(spawnProcess).toHaveBeenCalledWith(
       'pnpm',
       ['run', 'dev'],
