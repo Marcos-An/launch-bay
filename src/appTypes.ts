@@ -1,7 +1,7 @@
 import type { GitBranchInfo, GitMergePreview, HermesInstanceSnapshot, TerminalSnapshot } from './types';
 
 export type ProjectStatus = 'running' | 'stopped' | 'draft';
-export type Surface = 'hermes' | 'server' | 'agent-session';
+export type Surface = 'hermes' | 'server' | 'files' | 'agent-session';
 export type AgentSessionKind = 'hermes' | 'claude' | 'codex' | 'opencode' | 'gemini' | 'aider';
 
 export type GitOperation = 'fetch' | 'switch' | 'merge';

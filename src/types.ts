@@ -55,6 +55,43 @@ export type GitMergePreview = {
   error?: string;
 };
 
+export type ProjectFileEntry = {
+  path: string;
+  name: string;
+  type: 'file' | 'directory';
+  sizeBytes?: number;
+  modifiedAt?: string;
+  hidden?: boolean;
+  sensitive?: boolean;
+};
+
+export type ProjectTreeOptions = {
+  includeHidden?: boolean;
+  query?: string;
+  limit?: number;
+};
+
+export type ProjectTreeResult = {
+  cwd: string;
+  entries: ProjectFileEntry[];
+  error?: string;
+};
+
+export type ProjectFileReadResult = {
+  text?: string;
+  sizeBytes?: number;
+  sensitive?: boolean;
+  binary?: boolean;
+  error?: string;
+};
+
+export type ProjectFileWriteResult = {
+  ok: boolean;
+  sizeBytes?: number;
+  sensitive?: boolean;
+  error?: string;
+};
+
 export type LocalUserProfile = {
   id: string;
   displayName?: string;
@@ -369,6 +406,9 @@ export type LaunchBayBridge = {
   }>;
   resumeHermesSession?: (projectId: string, sessionId: string) => Promise<HermesSnapshot>;
   listProjectFiles?: (cwd: string) => Promise<{ files: string[] }>;
+  listProjectTree?: (projectId: string, options?: ProjectTreeOptions) => Promise<ProjectTreeResult>;
+  readProjectRuntimeFile?: (projectId: string, relativePath: string) => Promise<ProjectFileReadResult>;
+  writeProjectRuntimeFile?: (projectId: string, relativePath: string, text: string) => Promise<ProjectFileWriteResult>;
   listHermesSkills?: () => Promise<{
     skills: { name: string; description: string }[];
     error?: string;

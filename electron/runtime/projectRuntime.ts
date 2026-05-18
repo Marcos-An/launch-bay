@@ -1,8 +1,8 @@
 import type { ChildProcess, SpawnOptionsWithoutStdio } from 'node:child_process';
 import { execFileSync, spawn } from 'node:child_process';
-import { existsSync, readFileSync, readdirSync } from 'node:fs';
+import { existsSync, readFileSync, readdirSync, statSync, writeFileSync, type Dirent } from 'node:fs';
 import { homedir } from 'node:os';
-import { join } from 'node:path';
+import { basename, isAbsolute, join, relative, resolve } from 'node:path';
 import { expandHome } from '../paths.js';
 import { loginShellInvocation } from '../platform.js';
 import { getGitFileDiff, getGitSnapshot, type FileDiff, type FileDiffKind, type GitSnapshot } from './gitWorkbench.js';
@@ -115,6 +115,84 @@ export type RuntimeServerConfig = {
   command: string;
   nodeVersion?: string;
 };
+
+export type ProjectFileEntry = {
+  path: string;
+  name: string;
+  type: 'file' | 'directory';
+  sizeBytes?: number;
+  modifiedAt?: string;
+  hidden?: boolean;
+  sensitive?: boolean;
+};
+
+export type ProjectTreeOptions = {
+  includeHidden?: boolean;
+  query?: string;
+  limit?: number;
+};
+
+export type ProjectTreeResult = {
+  cwd: string;
+  entries: ProjectFileEntry[];
+  error?: string;
+};
+
+export type ProjectFileReadResult = {
+  text?: string;
+  sizeBytes?: number;
+  sensitive?: boolean;
+  binary?: boolean;
+  error?: string;
+};
+
+export type ProjectFileWriteResult = {
+  ok: boolean;
+  sizeBytes?: number;
+  sensitive?: boolean;
+  error?: string;
+};
+
+const PROJECT_TREE_EXCLUDED_NAMES = new Set(['.git', 'node_modules', 'dist', 'build', '.next', 'coverage']);
+const PROJECT_TREE_DEFAULT_LIMIT = 5000;
+const PROJECT_TEXT_FILE_LIMIT_BYTES = 1024 * 1024;
+
+function toPosixRelativePath(value: string) {
+  return value.split(/[\\/]+/).filter(Boolean).join('/');
+}
+
+function hasTraversalSegment(value: string) {
+  return value.split(/[\\/]+/).some((segment) => segment === '..');
+}
+
+function isHiddenProjectPath(value: string) {
+  return value.split('/').some((segment) => segment.startsWith('.') && segment !== '.' && segment !== '..');
+}
+
+function isSensitiveProjectPath(value: string) {
+  const lower = value.toLowerCase();
+  const fileName = basename(lower);
+  return fileName === '.env'
+    || fileName.startsWith('.env.')
+    || lower.endsWith('.pem')
+    || lower.endsWith('.key')
+    || lower.endsWith('.p12')
+    || lower.endsWith('.pfx');
+}
+
+function isProbablyBinary(buffer: Buffer) {
+  return buffer.includes(0);
+}
+
+function resolveProjectFilePath(cwd: string, relativePath: string) {
+  if (typeof relativePath !== 'string' || !relativePath.trim()) return { error: 'unsafe path' };
+  if (isAbsolute(relativePath) || hasTraversalSegment(relativePath)) return { error: 'unsafe path' };
+  const root = resolve(cwd);
+  const target = resolve(root, relativePath);
+  const rel = relative(root, target);
+  if (!rel || rel.startsWith('..') || isAbsolute(rel)) return { error: 'unsafe path' };
+  return { root, target, relativePath: toPosixRelativePath(rel) };
+}
 
 // Launch Bay is local-first: there are no built-in projects. Workspaces
 // and servers are added by the user through the UI and persisted in
@@ -576,6 +654,119 @@ export class ProjectRuntimeManager {
       pid: undefined,
       log: `${current.log}${current.log.endsWith('\n') || current.log.length === 0 ? '' : '\n'}[process] stop requested\n`
     });
+  }
+
+  listProjectTree(projectId: string, options: ProjectTreeOptions = {}): ProjectTreeResult {
+    const config = this.configs.get(projectId);
+    if (!config) return { cwd: '', entries: [], error: 'Project runtime is not configured.' };
+    const cwd = expandHome(config.cwd);
+    const root = resolve(cwd);
+    const entries: ProjectFileEntry[] = [];
+    const limit = Math.max(1, Math.min(options.limit ?? PROJECT_TREE_DEFAULT_LIMIT, PROJECT_TREE_DEFAULT_LIMIT));
+    const query = options.query?.trim().toLowerCase();
+
+    const walk = (absoluteDir: string, relativeDir = '') => {
+      if (entries.length >= limit) return;
+      let dirEntries: Dirent<string>[];
+      try {
+        dirEntries = readdirSync(absoluteDir, { withFileTypes: true });
+      } catch {
+        return;
+      }
+
+      const sortedEntries = dirEntries.sort((left, right) => {
+        if (left.isDirectory() && !right.isDirectory()) return -1;
+        if (!left.isDirectory() && right.isDirectory()) return 1;
+        return left.name.localeCompare(right.name);
+      });
+      const directoriesToWalk: Array<{ absolutePath: string; relativePath: string }> = [];
+
+      for (const entry of sortedEntries) {
+        if (entries.length >= limit) return;
+        if (PROJECT_TREE_EXCLUDED_NAMES.has(entry.name)) continue;
+        if (!entry.isDirectory() && !entry.isFile()) continue;
+
+        const relativePath = toPosixRelativePath(relativeDir ? `${relativeDir}/${entry.name}` : entry.name);
+        const hidden = isHiddenProjectPath(relativePath);
+        if (hidden && !options.includeHidden) continue;
+
+        const absolutePath = join(absoluteDir, entry.name);
+        if (entry.isDirectory()) directoriesToWalk.push({ absolutePath, relativePath });
+
+        if (query && !relativePath.toLowerCase().includes(query)) continue;
+
+        try {
+          const stats = statSync(absolutePath);
+          entries.push({
+            path: relativePath,
+            name: entry.name,
+            type: entry.isDirectory() ? 'directory' : 'file',
+            sizeBytes: entry.isFile() ? stats.size : undefined,
+            modifiedAt: stats.mtime.toISOString(),
+            hidden,
+            sensitive: isSensitiveProjectPath(relativePath)
+          });
+        } catch {
+          // Skip files that disappear or cannot be inspected while walking.
+        }
+      }
+
+      for (const directory of directoriesToWalk) {
+        if (entries.length >= limit) return;
+        walk(directory.absolutePath, directory.relativePath);
+      }
+    };
+
+    if (!existsSync(root)) return { cwd, entries: [], error: 'Project folder does not exist.' };
+    walk(root);
+    return { cwd, entries };
+  }
+
+  readProjectFile(projectId: string, relativePath: string): ProjectFileReadResult {
+    const config = this.configs.get(projectId);
+    if (!config) return { error: 'Project runtime is not configured.' };
+    const resolved = resolveProjectFilePath(expandHome(config.cwd), relativePath);
+    if (resolved.error || !resolved.target || !resolved.relativePath) return { error: resolved.error ?? 'unsafe path' };
+
+    try {
+      const stats = statSync(resolved.target);
+      if (!stats.isFile()) return { error: 'not a file' };
+      if (stats.size > PROJECT_TEXT_FILE_LIMIT_BYTES) return { error: 'file too large' };
+      const raw = readFileSync(resolved.target);
+      if (isProbablyBinary(raw)) return { error: 'binary file', binary: true };
+      return {
+        text: raw.toString('utf8'),
+        sizeBytes: stats.size,
+        sensitive: isSensitiveProjectPath(resolved.relativePath),
+        binary: false
+      };
+    } catch (error) {
+      return { error: error instanceof Error ? error.message : String(error) };
+    }
+  }
+
+  writeProjectFile(projectId: string, relativePath: string, text: string): ProjectFileWriteResult {
+    const config = this.configs.get(projectId);
+    if (!config) return { ok: false, error: 'Project runtime is not configured.' };
+    const resolved = resolveProjectFilePath(expandHome(config.cwd), relativePath);
+    if (resolved.error || !resolved.target || !resolved.relativePath) return { ok: false, error: resolved.error ?? 'unsafe path' };
+    if (typeof text !== 'string') return { ok: false, error: 'invalid text' };
+    if (Buffer.byteLength(text, 'utf8') > PROJECT_TEXT_FILE_LIMIT_BYTES) return { ok: false, error: 'file too large' };
+
+    try {
+      if (existsSync(resolved.target)) {
+        const stats = statSync(resolved.target);
+        if (!stats.isFile()) return { ok: false, error: 'not a file' };
+      }
+      writeFileSync(resolved.target, text, 'utf8');
+      return {
+        ok: true,
+        sizeBytes: Buffer.byteLength(text, 'utf8'),
+        sensitive: isSensitiveProjectPath(resolved.relativePath)
+      };
+    } catch (error) {
+      return { ok: false, error: error instanceof Error ? error.message : String(error) };
+    }
   }
 
   listBranches(projectId: string): ProjectBranchState {

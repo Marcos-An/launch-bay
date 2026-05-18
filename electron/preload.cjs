@@ -27,6 +27,11 @@ contextBridge.exposeInMainWorld('launchBay', {
   resumeHermesSession: (projectId, sessionId) =>
     ipcRenderer.invoke('launch-bay:hermes-resume-session', projectId, sessionId),
   listProjectFiles: (cwd) => ipcRenderer.invoke('launch-bay:list-project-files', cwd),
+  listProjectTree: (projectId, options) => ipcRenderer.invoke('launch-bay:project-tree', projectId, options),
+  readProjectRuntimeFile: (projectId, relativePath) =>
+    ipcRenderer.invoke('launch-bay:project-file-read', projectId, relativePath),
+  writeProjectRuntimeFile: (projectId, relativePath, text) =>
+    ipcRenderer.invoke('launch-bay:project-file-write', projectId, relativePath, text),
   listHermesSkills: () => ipcRenderer.invoke('launch-bay:list-hermes-skills'),
   readProjectFile: (cwd, relativePath) =>
     ipcRenderer.invoke('launch-bay:read-project-file', cwd, relativePath),

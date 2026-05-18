@@ -437,9 +437,20 @@ ipcMain.handle('launch-bay:project-branch-merge', async (_event, projectId: stri
 ipcMain.handle('launch-bay:project-branch-merge-preview', async (_event, projectId: string, branch: string) =>
   runtimeManager.getBranchMergePreview(projectId, branch)
 );
-ipcMain.handle('launch-bay:project-git-snapshot', async (_event, projectId: string) => runtimeManager.getGitSnapshot(projectId));
+ipcMain.handle('launch-bay:project-git-snapshot', async (_event, projectId: string) =>
+  runtimeManager.getGitSnapshot(projectId)
+);
 ipcMain.handle('launch-bay:project-file-diff', async (_event, projectId: string, filePath: string, kind?: 'worktree' | 'staged' | 'untracked') =>
   runtimeManager.getFileDiff(projectId, filePath, kind)
+);
+ipcMain.handle('launch-bay:project-tree', async (_event, projectId: string, options?: { includeHidden?: boolean; query?: string; limit?: number }) =>
+  runtimeManager.listProjectTree(projectId, options)
+);
+ipcMain.handle('launch-bay:project-file-read', async (_event, projectId: string, relativePath: string) =>
+  runtimeManager.readProjectFile(projectId, relativePath)
+);
+ipcMain.handle('launch-bay:project-file-write', async (_event, projectId: string, relativePath: string, text: string) =>
+  runtimeManager.writeProjectFile(projectId, relativePath, text)
 );
 
 function isLocalBrowserUrl(value: unknown): value is string {

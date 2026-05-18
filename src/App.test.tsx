@@ -159,6 +159,20 @@ function installLaunchBayMock(
       kind: 'worktree',
       diff: 'diff --git a/src/App.tsx b/src/App.tsx\n@@ -1 +1 @@\n-old\n+new\n'
     }),
+    listProjectTree: vi.fn().mockResolvedValue({
+      entries: [
+        { path: 'src', name: 'src', type: 'directory' },
+        { path: 'src/App.tsx', name: 'App.tsx', type: 'file' },
+        { path: '.env', name: '.env', type: 'file', hidden: true, sensitive: true },
+        { path: 'package.json', name: 'package.json', type: 'file' }
+      ]
+    }),
+    readProjectRuntimeFile: vi.fn().mockImplementation(async (_projectId: string, relativePath: string) => ({
+      text: relativePath === '.env' ? 'API_KEY=local-only\n' : 'export const app = 1;\n',
+      sizeBytes: relativePath === '.env' ? 19 : 22,
+      sensitive: relativePath === '.env'
+    })),
+    writeProjectRuntimeFile: vi.fn().mockResolvedValue({ ok: true, sizeBytes: 23 }),
     onRuntimeUpdate: vi.fn(() => () => undefined),
     sendHermesMessage: vi.fn().mockImplementation(async (projectId: string, text: string) => ({
       messages: [
@@ -856,6 +870,80 @@ describe('Launch Bay shell', () => {
     expect(api.getProjectFileDiff).toHaveBeenCalledWith('sample', 'src/App.tsx', 'worktree');
   });
 
+  it('opens a focused Files workspace with project folders and text editing only', async () => {
+    const user = userEvent.setup();
+    const api = installLaunchBayMock({
+      listProjectTree: vi.fn().mockResolvedValue({
+        entries: [
+          { path: 'src', name: 'src', type: 'directory' },
+          { path: '.env', name: '.env', type: 'file', hidden: true, sensitive: true },
+          { path: '.gitignore', name: '.gitignore', type: 'file', hidden: true },
+          { path: 'package.json', name: 'package.json', type: 'file' },
+          { path: 'src/components', name: 'components', type: 'directory' },
+          { path: 'src/components/Editor.tsx', name: 'Editor.tsx', type: 'file' }
+        ]
+      }),
+      readProjectRuntimeFile: vi.fn().mockImplementation(async (_projectId: string, relativePath: string) => ({
+        text: relativePath === '.env' ? 'API_KEY=local-only\n' : 'export const editor = true;\n',
+        sizeBytes: 26,
+        sensitive: relativePath === '.env'
+      })),
+      writeProjectRuntimeFile: vi.fn().mockResolvedValue({ ok: true, sizeBytes: 35 })
+    });
+    render(<App />);
+
+    await user.click(await screen.findByRole('button', { name: 'Open project files' }));
+
+    const filesView = await screen.findByRole('region', { name: 'Project files' });
+    expect(within(filesView).queryByRole('heading', { name: 'Project files' })).not.toBeInTheDocument();
+    expect(within(filesView).getByText('Sample')).toBeInTheDocument();
+    expect(within(filesView).getByRole('tree', { name: 'Project file tree' })).toHaveTextContent('src');
+    expect(within(filesView).getByRole('button', { name: 'Open .env' })).toBeInTheDocument();
+    expect(within(filesView).getByRole('button', { name: 'Open .gitignore' })).toBeInTheDocument();
+    expect(within(filesView).getByRole('button', { name: 'Open package.json' })).toBeInTheDocument();
+    expect(within(filesView).queryByRole('region', { name: 'Changed files' })).not.toBeInTheDocument();
+    expect(within(filesView).queryByText('Changed files')).not.toBeInTheDocument();
+    expect(within(filesView).queryByText('📁')).not.toBeInTheDocument();
+    expect(within(filesView).queryByRole('button', { name: 'Open src/components/Editor.tsx' })).not.toBeInTheDocument();
+
+    await user.click(within(filesView).getByRole('button', { name: 'Expand src' }));
+    const srcRow = within(filesView).getByRole('button', { name: 'Collapse src' });
+    const componentsRow = within(filesView).getByRole('button', { name: 'Expand src/components' });
+    const envRow = within(filesView).getByRole('button', { name: 'Open .env' });
+    expect(srcRow.compareDocumentPosition(componentsRow) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
+    expect(componentsRow.compareDocumentPosition(envRow) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
+
+    await user.click(componentsRow);
+
+    const editorRow = within(filesView).getByRole('button', { name: 'Open src/components/Editor.tsx' });
+    expect(editorRow).toBeInTheDocument();
+    expect(componentsRow.compareDocumentPosition(editorRow) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
+    expect(editorRow.compareDocumentPosition(envRow) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
+    expect(within(filesView).queryByText('📂')).not.toBeInTheDocument();
+    expect(within(filesView).queryByRole('button', { name: /terminal/i })).not.toBeInTheDocument();
+    expect(within(filesView).queryByRole('button', { name: /debug/i })).not.toBeInTheDocument();
+
+    await user.click(within(filesView).getByRole('button', { name: 'Open .env' }));
+
+    expect(await within(filesView).findByText('Sensitive local file')).toBeInTheDocument();
+    expect(within(filesView).getByTestId('syntax-highlight')).toHaveTextContent('API_KEY');
+    expect(within(filesView).getByTestId('syntax-highlight').querySelector('.syntax-key')).not.toBeNull();
+    expect(within(filesView).getByTestId('line-numbers')).toHaveTextContent('1');
+    expect(within(filesView).getByTestId('line-numbers')).toHaveTextContent('2');
+    const editor = await within(filesView).findByRole('textbox', { name: 'Editor for .env' });
+    expect(editor).toHaveValue('API_KEY=local-only\n');
+    await user.clear(editor);
+    await user.type(editor, 'API_KEY=updated-local-only{Enter}');
+    expect(within(filesView).getByText('Unsaved')).toBeInTheDocument();
+
+    expect(within(filesView).queryByRole('button', { name: 'Save file' })).not.toBeInTheDocument();
+    fireEvent.keyDown(editor, { key: 's', metaKey: true });
+
+    await waitFor(() => expect(api.writeProjectRuntimeFile).toHaveBeenCalledWith('sample', '.env', 'API_KEY=updated-local-only\n'));
+    expect(api.listProjectTree).toHaveBeenCalledWith('sample', expect.objectContaining({ includeHidden: true }));
+    expect(api.readProjectRuntimeFile).toHaveBeenCalledWith('sample', '.env');
+  });
+
   it('keeps file clicks inline and opens the tabbed diff review from the summary action', async () => {
     const api = installLaunchBayMock({
       getProjectFileDiff: vi.fn().mockImplementation(async (_projectId: string, path: string, kind: string) => ({
@@ -923,10 +1011,11 @@ describe('Launch Bay shell', () => {
     await user.click(await screen.findByRole('button', { name: /Expand changes workbench/i }));
     const workbench = await screen.findByRole('complementary', { name: 'Changes workbench' });
 
-    expect(within(workbench).getByRole('group', { name: 'Modified changes' })).toHaveTextContent('src/App.tsx');
-    expect(within(workbench).getByRole('group', { name: 'New changes' })).toHaveTextContent('src/NewPanel.tsx');
-    expect(within(workbench).getByRole('group', { name: 'Deleted changes' })).toHaveTextContent('src/OldPanel.tsx');
-    expect(within(workbench).getByRole('group', { name: 'Conflicted changes' })).toHaveTextContent('src/Conflict.tsx');
+    expect(within(workbench).queryByRole('group', { name: 'Modified changes' })).not.toBeInTheDocument();
+    expect(within(workbench).getByRole('button', { name: 'Modified src/App.tsx' })).toHaveTextContent('Modified');
+    expect(within(workbench).getByRole('button', { name: 'New src/NewPanel.tsx' })).toHaveTextContent('New');
+    expect(within(workbench).getByRole('button', { name: 'Deleted src/OldPanel.tsx' })).toHaveTextContent('Deleted');
+    expect(within(workbench).getByRole('button', { name: 'Conflict src/Conflict.tsx' })).toHaveTextContent('Conflict');
     expect(within(workbench).getByRole('alert')).toHaveTextContent(/Run your normal conflict resolution commands/i);
 
     expect(await within(workbench).findByLabelText('Diff for src/App.tsx')).toHaveTextContent('+new grouped');
@@ -936,7 +1025,7 @@ describe('Launch Bay shell', () => {
     expect(writeText).toHaveBeenCalledWith(groupedDiff);
   });
 
-  it('keeps the collapsed changes card fresh without touching an expanded diff review', async () => {
+  it('keeps the collapsed changes card fresh and refreshes the expanded workbench on focus', async () => {
     const api = installLaunchBayMock();
     render(<App />);
 
@@ -978,10 +1067,10 @@ describe('Launch Bay shell', () => {
       await Promise.resolve();
     });
 
-    expect(api.getProjectGitSnapshot).not.toHaveBeenCalled();
+    expect(api.getProjectGitSnapshot).toHaveBeenCalledTimes(1);
   });
 
-  it('does not auto-refresh the changes workbench while the user is reading a diff', async () => {
+  it('auto-refreshes the changes workbench while the user is reading a diff', async () => {
     const api = installLaunchBayMock();
     render(<App />);
 
@@ -1000,8 +1089,9 @@ describe('Launch Bay shell', () => {
       await Promise.resolve();
     });
 
-    expect(api.getProjectGitSnapshot).not.toHaveBeenCalled();
+    expect(api.getProjectGitSnapshot).toHaveBeenCalled();
 
+    vi.mocked(api.getProjectGitSnapshot).mockClear();
     await act(async () => {
       fireEvent.click(within(workbench).getByRole('button', { name: 'Refresh' }));
       await Promise.resolve();
@@ -1259,6 +1349,135 @@ describe('Launch Bay shell', () => {
     expect(screen.queryAllByText('main').some((node) => node.classList.contains('row-subtitle'))).toBe(false);
   });
 
+  it('refreshes branch controls automatically when the app regains focus', async () => {
+    const listProjectBranches = vi.fn()
+      .mockResolvedValueOnce({
+        cwd: '/repos/sample-app',
+        current: 'main',
+        dirty: false,
+        branches: [{ name: 'main', current: true }]
+      })
+      .mockResolvedValueOnce({
+        cwd: '/repos/sample-app',
+        current: 'main',
+        dirty: false,
+        branches: [{ name: 'main', current: true }]
+      })
+      .mockResolvedValueOnce({
+        cwd: '/repos/sample-app',
+        current: 'feature/auto-refresh',
+        dirty: true,
+        branches: [
+          { name: 'feature/auto-refresh', current: true },
+          { name: 'main', current: false }
+        ]
+      });
+    const user = userEvent.setup();
+    installLaunchBayMock({ listProjectBranches });
+
+    render(<App />);
+    await user.click(screen.getByRole('button', { name: 'Server' }));
+    const config = await screen.findByRole('region', { name: 'Project config' });
+    expect(within(config).getByText('Clean')).toBeInTheDocument();
+
+    await act(async () => {
+      window.dispatchEvent(new Event('focus'));
+      await Promise.resolve();
+    });
+
+    await waitFor(() => expect(within(config).getByText('Dirty')).toBeInTheDocument());
+    expect(within(config).getByText('feature/auto-refresh')).toBeInTheDocument();
+    expect(listProjectBranches).toHaveBeenCalledTimes(3);
+  });
+
+  it('refreshes the open changes workbench automatically when the app regains focus', async () => {
+    const getProjectGitSnapshot = vi.fn()
+      .mockResolvedValueOnce({
+        cwd: '/repos/sample-app',
+        branch: 'main',
+        headSha: 'abc123',
+        isDirty: true,
+        isMerging: false,
+        isRebasing: false,
+        isCherryPicking: false,
+        files: [{ path: 'src/App.tsx', status: 'modified', staged: false, unstaged: true }],
+        conflicts: []
+      })
+      .mockResolvedValueOnce({
+        cwd: '/repos/sample-app',
+        branch: 'main',
+        headSha: 'abc123',
+        isDirty: true,
+        isMerging: false,
+        isRebasing: false,
+        isCherryPicking: false,
+        files: [{ path: 'src/App.tsx', status: 'modified', staged: false, unstaged: true }],
+        conflicts: []
+      })
+      .mockResolvedValueOnce({
+        cwd: '/repos/sample-app',
+        branch: 'feature/auto-refresh',
+        headSha: 'def456',
+        isDirty: true,
+        isMerging: false,
+        isRebasing: false,
+        isCherryPicking: false,
+        files: [
+          { path: 'src/App.tsx', status: 'modified', staged: false, unstaged: true },
+          { path: 'src/NewPanel.tsx', status: 'untracked', staged: false, unstaged: true }
+        ],
+        conflicts: []
+      });
+    installLaunchBayMock({
+      getProjectGitSnapshot,
+      getProjectFileDiff: vi.fn().mockResolvedValue({ path: 'src/App.tsx', kind: 'worktree', diff: 'diff --git a/src/App.tsx b/src/App.tsx\n@@ -1 +1 @@\n-old\n+new\n' })
+    });
+    render(<App />);
+
+    fireEvent.click(await screen.findByRole('button', { name: /Expand changes workbench/i }));
+    const workbench = await screen.findByRole('complementary', { name: 'Changes workbench' });
+    expect(within(workbench).getByText('main')).toBeInTheDocument();
+    expect(within(workbench).getByRole('button', { name: 'Modified src/App.tsx' })).toBeInTheDocument();
+
+    await act(async () => {
+      window.dispatchEvent(new Event('focus'));
+      await Promise.resolve();
+    });
+
+    await waitFor(() => expect(within(workbench).getByText('feature/auto-refresh')).toBeInTheDocument());
+    expect(within(workbench).getByRole('button', { name: 'New src/NewPanel.tsx' })).toBeInTheDocument();
+    expect(getProjectGitSnapshot).toHaveBeenCalledTimes(3);
+  });
+
+  it('refreshes the project file tree automatically when the app regains focus', async () => {
+    const listProjectTree = vi.fn()
+      .mockResolvedValueOnce({
+        entries: [{ path: '.env', name: '.env', type: 'file', hidden: true, sensitive: true }]
+      })
+      .mockResolvedValueOnce({
+        entries: [
+          { path: '.env', name: '.env', type: 'file', hidden: true, sensitive: true },
+          { path: 'package.json', name: 'package.json', type: 'file' }
+        ]
+      });
+    const user = userEvent.setup();
+    installLaunchBayMock({ listProjectTree });
+
+    render(<App />);
+    await user.click(await screen.findByRole('button', { name: 'Open project files' }));
+    const filesView = await screen.findByRole('region', { name: 'Project files' });
+    expect(await within(filesView).findByRole('button', { name: 'Open .env' })).toBeInTheDocument();
+    expect(within(filesView).queryByRole('button', { name: 'Open package.json' })).not.toBeInTheDocument();
+
+    await act(async () => {
+      window.dispatchEvent(new Event('focus'));
+      await Promise.resolve();
+    });
+
+    expect(await within(filesView).findByRole('button', { name: 'Open package.json' })).toBeInTheDocument();
+    expect(listProjectTree).toHaveBeenCalledTimes(2);
+  });
+
   it('starts the Sample runtime in the server terminal instead of a logger panel', async () => {
     const api = installLaunchBayMock({
       startProject: vi.fn().mockResolvedValue({
@@ -1497,7 +1716,7 @@ describe('Launch Bay shell', () => {
     expect(screen.queryByRole('button', { name: 'Open Hermes' })).not.toBeInTheDocument();
   });
 
-  it('groups selected project navigation with Sessions before Server runtime', () => {
+  it('groups selected project navigation with Sessions, Server runtime, then Changes and project file action', () => {
     installLaunchBayMock();
 
     render(<App />);
@@ -1505,12 +1724,17 @@ describe('Launch Bay shell', () => {
     const workspaceNav = screen.getByRole('navigation', { name: 'Sample workspace' });
     const sessionsGroup = within(workspaceNav).getByRole('group', { name: 'Sessions' });
     const serverGroup = within(workspaceNav).getByRole('group', { name: 'Server runtime' });
+    const changesGroup = within(workspaceNav).getByRole('group', { name: 'Changes' });
 
     expect(sessionsGroup.compareDocumentPosition(serverGroup) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
+    expect(serverGroup.compareDocumentPosition(changesGroup) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
     expect(within(sessionsGroup).getByRole('button', { name: 'Open Hermes' })).toBeInTheDocument();
     expect(within(sessionsGroup).getByRole('button', { name: 'New session' })).toBeInTheDocument();
     expect(within(serverGroup).getByRole('button', { name: 'Server' })).toBeInTheDocument();
     expect(within(serverGroup).queryByRole('button', { name: 'Open Hermes' })).not.toBeInTheDocument();
+    expect(within(workspaceNav).queryByRole('group', { name: 'Files' })).not.toBeInTheDocument();
+    expect(within(changesGroup).getByRole('button', { name: 'Open project files' })).toHaveTextContent('Open files');
+    expect(within(changesGroup).getByText('Browse/edit')).toBeInTheDocument();
   });
 
   it('creates configured agent sessions from the sidebar setup flow', async () => {

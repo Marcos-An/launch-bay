@@ -3,6 +3,7 @@ import { HermesChatView } from './components/HermesChatView';
 import { AgentSessionView } from './components/AgentSessionView';
 import { ServerView } from './components/ServerView';
 import { ChangesWorkbench } from './components/ChangesWorkbench';
+import { ProjectFilesView } from './components/ProjectFilesView';
 import { Sidebar } from './components/Sidebar';
 import { MergeConfirmationModal } from './components/MergeConfirmationModal';
 import { NewSessionModal } from './components/NewSessionModal';
@@ -51,6 +52,7 @@ const EMPTY_LAUNCH_BAY_CONFIG: LaunchBayConfig = {
   servers: []
 };
 const RUNTIME_STATUS_REFRESH_MS = 3000;
+const BRANCH_STATE_REFRESH_MS = 5000;
 const WORKSPACE_PROJECT_STORAGE_KEY = 'launch-bay:workspace:project-id';
 const WORKSPACE_SURFACE_STORAGE_KEY = 'launch-bay:workspace:surface';
 const LOCAL_CONFIG_CACHE_STORAGE_KEY = 'launch-bay:config-cache';
@@ -230,7 +232,9 @@ function isFullNodeVersion(value: string | undefined): value is string {
 
 function readStoredSurface(): Surface {
   const storedSurface = safeReadStorage(WORKSPACE_SURFACE_STORAGE_KEY);
-  return storedSurface === 'hermes' || storedSurface === 'server' ? storedSurface : DEFAULT_SURFACE;
+  return storedSurface === 'hermes' || storedSurface === 'server' || storedSurface === 'files'
+    ? storedSurface
+    : DEFAULT_SURFACE;
 }
 
 function ServerChangesWorkbench({
@@ -657,15 +661,29 @@ function App() {
     let cancelled = false;
     const projectId = selectedRuntimeId;
 
-    bridge.listProjectBranches(projectId)
-      .then((branchState) => {
-        if (cancelled) return;
-        setProjectBranches((current) => ({ ...current, [projectId]: branchState }));
-      })
-      .catch(() => undefined);
+    const refreshBranchState = () => {
+      bridge.listProjectBranches!(projectId)
+        .then((branchState) => {
+          if (cancelled) return;
+          setProjectBranches((current) => ({ ...current, [projectId]: branchState }));
+        })
+        .catch(() => undefined);
+    };
+
+    const refreshWhenVisible = () => {
+      if (document.visibilityState === 'visible') refreshBranchState();
+    };
+
+    refreshBranchState();
+    const intervalId = window.setInterval(refreshWhenVisible, BRANCH_STATE_REFRESH_MS);
+    window.addEventListener('focus', refreshWhenVisible);
+    document.addEventListener('visibilitychange', refreshWhenVisible);
 
     return () => {
       cancelled = true;
+      window.clearInterval(intervalId);
+      window.removeEventListener('focus', refreshWhenVisible);
+      document.removeEventListener('visibilitychange', refreshWhenVisible);
     };
   }, [hasConfiguredServer, selectedRuntimeId, configSyncVersion]);
 
@@ -1515,6 +1533,7 @@ function App() {
           if (workspace) setWorkspaceToDelete(workspace);
         }}
         onOpenServerSurface={() => setSurface('server')}
+        onOpenFilesSurface={() => setSurface('files')}
         onOpenNewSessionModal={openNewSessionModal}
         onOpenNewServerModal={openNewServerModal}
         onSelectDefaultHermesSession={selectDefaultHermesSession}
@@ -1611,6 +1630,11 @@ function App() {
               onClose={() => setActiveChangesServerId(undefined)}
             />
           </div>
+        ) : surface === 'files' ? (
+          <ProjectFilesView
+            projectId={selectedRuntimeId}
+            projectName={selectedServerConfig?.name ?? selectedProject.name}
+          />
         ) : surface === 'agent-session' && selectedAgentSession ? (
           selectedAgentSession.kind === 'hermes' ? (
             <div className="chat-workbench-layout">

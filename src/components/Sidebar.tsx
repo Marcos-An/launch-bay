@@ -31,6 +31,7 @@ type SidebarProps = {
   onSelectProject: (id: string) => void;
   onDeleteWorkspace?: (id: string) => void;
   onOpenServerSurface?: () => void;
+  onOpenFilesSurface?: () => void;
   onOpenNewSessionModal: () => void;
   onOpenNewServerModal: () => void;
   onSelectDefaultHermesSession: () => void;
@@ -195,6 +196,7 @@ export function Sidebar({
   onSelectProject,
   onDeleteWorkspace,
   onOpenServerSurface,
+  onOpenFilesSurface,
   onOpenNewSessionModal,
   onOpenNewServerModal,
   onSelectDefaultHermesSession,
@@ -523,6 +525,18 @@ export function Sidebar({
                 />
               ))}
             </div>
+            {onOpenFilesSurface ? (
+              <button
+                type="button"
+                className={`files-sidebar-action ${surface === 'files' ? 'active' : ''}`}
+                aria-label="Open project files"
+                aria-pressed={surface === 'files'}
+                onClick={onOpenFilesSurface}
+              >
+                <span className="files-sidebar-action-main">Open files</span>
+                <span className="files-sidebar-action-meta">Browse/edit</span>
+              </button>
+            ) : null}
           </div>
         ) : null}
       </nav>

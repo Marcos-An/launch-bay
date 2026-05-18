@@ -48,6 +48,9 @@ describe('Electron preload bridge packaging', () => {
     expect(preloadSource).toContain('switchProjectBranch');
     expect(preloadSource).toContain('mergeProjectBranch');
     expect(preloadSource).toContain('getProjectBranchMergePreview');
+    expect(preloadSource).toContain('listProjectTree');
+    expect(preloadSource).toContain('readProjectRuntimeFile');
+    expect(preloadSource).toContain('writeProjectRuntimeFile');
     expect(preloadSource).toContain('launch-bay:hermes-instance-create');
     expect(preloadSource).toContain('launch-bay:config-get');
     expect(preloadSource).toContain('launch-bay:workspace-save');

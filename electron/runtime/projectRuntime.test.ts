@@ -1,7 +1,7 @@
 // @vitest-environment node
 import { execFileSync } from 'node:child_process';
 import { EventEmitter } from 'node:events';
-import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs';
+import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir, homedir } from 'node:os';
 import { join } from 'node:path';
 import { describe, expect, it, vi } from 'vitest';
@@ -144,6 +144,66 @@ describe('ProjectRuntimeManager', () => {
     expect(manager.getSnapshot('api').error).toBeUndefined();
     expect(manager.listBranches('api').error).toMatch(/not configured/i);
     expect(manager.listBranches('web').cwd).toBe('/repos/web');
+  });
+
+  it('lists, reads, and writes project text files without leaving the configured project folder', () => {
+    const cwd = mkdtempSync(join(tmpdir(), 'launch-bay-files-'));
+    try {
+      mkdirSync(join(cwd, 'src', 'components'), { recursive: true });
+      writeFileSync(join(cwd, 'src', 'components', 'Editor.tsx'), 'export const editor = true;\n', 'utf8');
+      writeFileSync(join(cwd, '.env'), 'API_KEY=local-only\n', 'utf8');
+      mkdirSync(join(cwd, 'node_modules', 'ignored'), { recursive: true });
+      writeFileSync(join(cwd, 'node_modules', 'ignored', 'index.js'), 'ignored\n', 'utf8');
+
+      const manager = new ProjectRuntimeManager([createProjectRuntimeConfig({ id: 'sample', cwd, command: 'pnpm dev' })]);
+
+      const tree = manager.listProjectTree('sample', { includeHidden: true });
+      expect(tree.entries.map((entry) => `${entry.type}:${entry.path}`)).toEqual(expect.arrayContaining([
+        'directory:src',
+        'directory:src/components',
+        'file:src/components/Editor.tsx',
+        'file:.env'
+      ]));
+      expect(tree.entries.some((entry) => entry.path.includes('node_modules'))).toBe(false);
+      expect(tree.entries.find((entry) => entry.path === '.env')).toMatchObject({ sensitive: true, hidden: true });
+
+      expect(manager.readProjectFile('sample', 'src/components/Editor.tsx')).toMatchObject({
+        text: 'export const editor = true;\n',
+        sensitive: false
+      });
+      expect(manager.readProjectFile('sample', '../outside.txt').error).toMatch(/unsafe/i);
+      expect(manager.writeProjectFile('sample', '/tmp/outside.txt', 'nope').error).toMatch(/unsafe/i);
+
+      const saved = manager.writeProjectFile('sample', '.env', 'API_KEY=updated-local-only\n');
+      expect(saved).toMatchObject({ ok: true, sensitive: true });
+      expect(readFileSync(join(cwd, '.env'), 'utf8')).toBe('API_KEY=updated-local-only\n');
+    } finally {
+      rmSync(cwd, { recursive: true, force: true });
+    }
+  });
+
+  it('keeps root files visible before descending into nested project folders', () => {
+    const cwd = mkdtempSync(join(tmpdir(), 'launch-bay-root-files-'));
+    try {
+      mkdirSync(join(cwd, 'app', 'deep'), { recursive: true });
+      mkdirSync(join(cwd, 'docs'), { recursive: true });
+      writeFileSync(join(cwd, 'app', 'deep', 'one.ts'), 'one\n', 'utf8');
+      writeFileSync(join(cwd, 'app', 'deep', 'two.ts'), 'two\n', 'utf8');
+      writeFileSync(join(cwd, '.env'), 'API_KEY=local-only\n', 'utf8');
+      writeFileSync(join(cwd, 'package.json'), '{}\n', 'utf8');
+
+      const manager = new ProjectRuntimeManager([createProjectRuntimeConfig({ id: 'sample', cwd, command: 'pnpm dev' })]);
+
+      const tree = manager.listProjectTree('sample', { includeHidden: true, limit: 4 });
+      expect(tree.entries.map((entry) => `${entry.type}:${entry.path}`)).toEqual([
+        'directory:app',
+        'directory:docs',
+        'file:.env',
+        'file:package.json'
+      ]);
+    } finally {
+      rmSync(cwd, { recursive: true, force: true });
+    }
   });
 
   it('starts a project with the configured env and command', async () => {

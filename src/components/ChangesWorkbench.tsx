@@ -11,28 +11,7 @@ const STATUS_LABELS: Record<GitFileChange['status'], string> = {
   conflicted: 'Conflict'
 };
 
-const STATUS_SHORT: Record<GitFileChange['status'], string> = {
-  modified: 'M',
-  added: 'A',
-  deleted: 'D',
-  renamed: 'R',
-  copied: 'C',
-  untracked: 'U',
-  conflicted: '!'
-};
-
-const COLLAPSED_SNAPSHOT_REFRESH_MS = 5_000;
-
-const FILE_GROUPS: Array<{
-  key: string;
-  label: string;
-  statuses: GitFileChange['status'][];
-}> = [
-  { key: 'conflicted', label: 'Conflicted', statuses: ['conflicted'] },
-  { key: 'modified', label: 'Modified', statuses: ['modified', 'renamed', 'copied'] },
-  { key: 'new', label: 'New', statuses: ['added', 'untracked'] },
-  { key: 'deleted', label: 'Deleted', statuses: ['deleted'] }
-];
+const GIT_SNAPSHOT_REFRESH_MS = 5_000;
 
 const EMPTY_SNAPSHOT: GitSnapshot = {
   cwd: '',
@@ -121,13 +100,6 @@ export function ChangesWorkbench({
   const activeReviewDiff = activeReviewPath ? reviewDiffs[activeReviewPath] : undefined;
   const activeReviewLoading = activeReviewPath ? Boolean(loadingReviewDiffs[activeReviewPath]) : false;
   const summary = useMemo(() => summarize(snapshot.files), [snapshot.files]);
-  const groupedFiles = useMemo(
-    () => FILE_GROUPS.map((group) => ({
-      ...group,
-      files: snapshot.files.filter((file) => group.statuses.includes(file.status))
-    })).filter((group) => group.files.length > 0),
-    [snapshot.files]
-  );
   const branchLabel = snapshot.branch ?? 'No branch';
   const fileCountLabel = `${snapshot.files.length} file${snapshot.files.length === 1 ? '' : 's'}`;
 
@@ -235,7 +207,7 @@ export function ChangesWorkbench({
   }, [applySnapshot, bridge, hasGitBridge, projectId]);
 
   useEffect(() => {
-    if (!hasGitBridge || !collapsed) return undefined;
+    if (!hasGitBridge) return undefined;
 
     const refreshWhenVisible = () => {
       if (document.visibilityState === 'visible') {
@@ -243,7 +215,7 @@ export function ChangesWorkbench({
       }
     };
 
-    const intervalId = window.setInterval(refreshWhenVisible, COLLAPSED_SNAPSHOT_REFRESH_MS);
+    const intervalId = window.setInterval(refreshWhenVisible, GIT_SNAPSHOT_REFRESH_MS);
     window.addEventListener('focus', refreshWhenVisible);
     document.addEventListener('visibilitychange', refreshWhenVisible);
 
@@ -252,7 +224,7 @@ export function ChangesWorkbench({
       window.removeEventListener('focus', refreshWhenVisible);
       document.removeEventListener('visibilitychange', refreshWhenVisible);
     };
-  }, [collapsed, hasGitBridge, refreshSnapshot]);
+  }, [hasGitBridge, refreshSnapshot]);
 
   useEffect(() => {
     if (!hasGitBridge || !selectedFile || collapsed) {
@@ -428,34 +400,21 @@ export function ChangesWorkbench({
               <div className="changes-empty" role="status">
                 No local changes in {projectName}. This worktree is clean.
               </div>
-            ) : groupedFiles.map((group) => (
-              <section
-                className="changes-file-group"
-                role="group"
-                aria-label={`${group.label} changes`}
-                key={group.key}
+            ) : snapshot.files.map((file) => (
+              <button
+                className={`change-file ${selectedFile?.path === file.path ? 'active' : ''} change-file-${file.status}`}
+                type="button"
+                key={`${file.status}:${file.oldPath ?? ''}:${file.path}`}
+                onClick={() => selectInlineFile(file)}
+                aria-label={`${STATUS_LABELS[file.status]} ${file.path}`}
               >
-                <div className="changes-file-group-head">
-                  <span>{group.label}</span>
-                  <span>{group.files.length}</span>
-                </div>
-                {group.files.map((file) => (
-                  <button
-                    className={`change-file ${selectedFile?.path === file.path ? 'active' : ''} change-file-${file.status}`}
-                    type="button"
-                    key={`${file.status}:${file.oldPath ?? ''}:${file.path}`}
-                    onClick={() => selectInlineFile(file)}
-                    aria-label={`${STATUS_LABELS[file.status]} ${file.path}`}
-                  >
-                    <span className="change-file-badge">{STATUS_SHORT[file.status]}</span>
-                    <span className="change-file-copy">
-                      <span className="change-file-path">{file.path}</span>
-                      {file.oldPath ? <span className="change-file-old">from {file.oldPath}</span> : null}
-                    </span>
-                    <span className="change-file-state">{file.staged ? 'staged' : file.unstaged ? 'worktree' : ''}</span>
-                  </button>
-                ))}
-              </section>
+                <span className="change-file-badge">{STATUS_LABELS[file.status]}</span>
+                <span className="change-file-copy">
+                  <span className="change-file-path">{file.path}</span>
+                  {file.oldPath ? <span className="change-file-old">from {file.oldPath}</span> : null}
+                </span>
+                <span className="change-file-state">{file.staged ? 'staged' : file.unstaged ? 'worktree' : ''}</span>
+              </button>
             ))}
           </section>
 
@@ -526,7 +485,7 @@ export function ChangesWorkbench({
                     onClick={() => openReviewFile(file)}
                     aria-label={`${STATUS_LABELS[file.status]} ${file.path}`}
                   >
-                    <span className="change-file-badge">{STATUS_SHORT[file.status]}</span>
+                    <span className="change-file-badge">{STATUS_LABELS[file.status]}</span>
                     <span className="change-file-copy">
                       <span className="change-file-path">{file.path}</span>
                       {file.oldPath ? <span className="change-file-old">from {file.oldPath}</span> : null}
