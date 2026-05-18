@@ -31,6 +31,7 @@ type ServerViewProps = {
   branchFilter: string;
   branchFallbackOption: string;
   branchConfigWarning?: string;
+  branchActionNotice?: string;
   activeGitOperation?: ActiveGitOperation;
   activeGitOperationLabel?: string;
   canSwitchBranches: boolean;
@@ -77,6 +78,7 @@ export function ServerView({
   branchFilter,
   branchFallbackOption,
   branchConfigWarning,
+  branchActionNotice,
   activeGitOperation,
   activeGitOperationLabel,
   canSwitchBranches,
@@ -151,10 +153,12 @@ export function ServerView({
             ) : null}
           </div>
         </div>
-        <div className="runtime-cell">
-          <div className="runtime-label">Branch</div>
-          <div className={`runtime-value ${branchSubtitle ? '' : 'runtime-value-empty'}`}>{branchSubtitle ?? '—'}</div>
-        </div>
+        {hasConfiguredServer ? (
+          <div className="runtime-cell">
+            <div className="runtime-label">Branch</div>
+            <div className={`runtime-value ${branchSubtitle ? '' : 'runtime-value-empty'}`}>{branchSubtitle ?? '—'}</div>
+          </div>
+        ) : null}
         <div className="runtime-cell">
           <div className="runtime-label">Local URL</div>
           <div className="runtime-value runtime-value-with-action">
@@ -178,7 +182,8 @@ export function ServerView({
         </div>
       </div>
 
-      <section className="project-config-panel" aria-label="Project config">
+      {hasConfiguredServer ? (
+        <section className="project-config-panel" aria-label="Project config">
         <div className="project-config-head">
           <div>
             <div className="runtime-label">Git</div>
@@ -215,8 +220,9 @@ export function ServerView({
           <div className="branch-list" role="list" aria-label="Local branches">
             {visibleBranches.map((branch) => {
               const isCurrentBranch = branch.name === projectBranchState?.current;
+              const currentBranchName = projectBranchState?.current ?? 'current branch';
               const switchLabel = `Switch to ${branch.name}`;
-              const mergeLabel = `Merge ${branch.name} into ${projectBranchState?.current ?? 'current branch'}`;
+              const mergeLabel = `Merge ${branch.name} into current branch ${currentBranchName}`;
               return (
                 <div className={`branch-card ${isCurrentBranch ? 'branch-card-current' : ''}`} role="listitem" key={branch.name}>
                   <div className="branch-card-main">
@@ -252,7 +258,7 @@ export function ServerView({
                         onClick={() => onRequestMergeBranch(branch.name)}
                         disabled={!canMergeBranches}
                       >
-                        Merge
+                        Merge into current
                       </button>
                     </div>
                   )}
@@ -264,7 +270,9 @@ export function ServerView({
           <div className="branch-empty" role="status">{branchFallbackOption}</div>
         )}
         {branchConfigWarning ? <div className="config-warning" role="status">{branchConfigWarning}</div> : null}
-      </section>
+        {branchActionNotice ? <div className="config-success" role="status">{branchActionNotice}</div> : null}
+        </section>
+      ) : null}
 
       <div className="terminal-panel" aria-label="Server terminal">
         <div className="terminal-bar">

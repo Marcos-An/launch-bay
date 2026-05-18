@@ -1,4 +1,4 @@
-import type { HermesInstanceSnapshot, TerminalSnapshot } from './types';
+import type { GitBranchInfo, GitMergePreview, HermesInstanceSnapshot, TerminalSnapshot } from './types';
 
 export type ProjectStatus = 'running' | 'stopped' | 'draft';
 export type Surface = 'hermes' | 'server' | 'agent-session';
@@ -16,6 +16,12 @@ export type MergeConfirmation = {
   projectId: string;
   sourceBranch: string;
   targetBranch: string;
+  repoCwd: string;
+  sourceBranchInfo?: GitBranchInfo;
+  targetBranchInfo?: GitBranchInfo;
+  preview?: GitMergePreview;
+  previewStatus: 'idle' | 'loading' | 'ready' | 'error';
+  previewError?: string;
 };
 
 export type EmbeddedTerminal = TerminalSnapshot & {

@@ -123,6 +123,7 @@ type HermesChatViewProps = {
   onDraftChange: (value: string) => void;
   onSend: () => void;
   onReset: () => void;
+  onClose?: () => void;
   composerInputRef: RefObject<HTMLTextAreaElement>;
   transcriptRef: RefObject<HTMLDivElement>;
   attachments?: HermesImageAttachment[];
@@ -156,6 +157,7 @@ export function HermesChatView({
   onDraftChange,
   onSend,
   onReset,
+  onClose,
   composerInputRef,
   transcriptRef,
   attachments = [],
@@ -352,7 +354,8 @@ export function HermesChatView({
     event.preventDefault();
   }
 
-  const sendDisabled = !hasHermesBridge || isThinking;
+  const stopControlAvailable = isThinking && Boolean(onCancel);
+  const sendDisabled = !hasHermesBridge || (isThinking && !stopControlAvailable);
   const canAttach = Boolean(onPickAttachment && hasHermesBridge);
 
   return (
@@ -567,6 +570,9 @@ export function HermesChatView({
           />
           <div className="composer-bottom">
             <button className="text-button" onClick={onReset} disabled={!hasHermesBridge}>Reset session</button>
+            {onClose ? (
+              <button className="text-button" onClick={onClose}>Close session</button>
+            ) : null}
             {onOpenHistory ? (
               <button
                 type="button"
@@ -591,17 +597,16 @@ export function HermesChatView({
             <span className="label">{projectName}</span>
             <span className="context-usage" aria-label="Hermes context usage">{contextUsageLabel}</span>
             <span className="push" />
-            {isThinking && onCancel ? (
-              <button
-                type="button"
-                className="text-button composer-cancel"
-                aria-label="Stop Hermes"
-                onClick={onCancel}
-              >
-                Stop
-              </button>
-            ) : null}
-            <button className="primary" onClick={onSend} disabled={sendDisabled}>Send</button>
+            <button
+              type="button"
+              className={stopControlAvailable ? 'primary composer-stop' : 'primary'}
+              aria-label={stopControlAvailable ? `Stop ${sessionName}` : undefined}
+              title={stopControlAvailable ? `Stop ${sessionName}` : undefined}
+              onClick={stopControlAvailable ? onCancel : onSend}
+              disabled={sendDisabled}
+            >
+              {stopControlAvailable ? <span aria-hidden="true">■</span> : 'Send'}
+            </button>
           </div>
         </div>
       </div>

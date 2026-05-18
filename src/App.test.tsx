@@ -279,29 +279,25 @@ describe('Launch Bay shell', () => {
     expect(within(projectButton).queryByText('feature/session-cockpit · dirty')).not.toBeInTheDocument();
   });
 
-  it('shows project cwd, git state, and a configure action when the selected project has no server yet', async () => {
+  it('shows project cwd and configure action without git branch UI when the selected project has no server yet', async () => {
     const projectOnlyConfig: TestLaunchBayConfig = {
       version: 1,
       localUser: { id: 'local-test', createdAt: '2026-01-01T00:00:00.000Z', updatedAt: '2026-01-01T00:00:00.000Z', onboardingCompleted: true },
       workspaces: [{ id: 'sample-app', name: 'sample-app', cwd: '/repos/sample-app', createdAt: '2026-01-01T00:00:00.000Z', updatedAt: '2026-01-01T00:00:00.000Z' }],
       servers: []
     };
-    installLaunchBayMock({
+    const api = installLaunchBayMock({
       getLaunchBayConfig: vi.fn().mockResolvedValue(projectOnlyConfig),
-      getRuntimeStatus: vi.fn()
-        .mockResolvedValueOnce({ status: 'stopped', log: '' })
-        .mockResolvedValue({ status: 'stopped', log: '', branch: 'feature/project-detect', dirty: false }),
-      listProjectBranches: vi.fn()
-        .mockResolvedValueOnce({ cwd: '', branches: [], error: 'Project runtime is not configured.' })
-        .mockResolvedValue({
-          cwd: '/repos/sample-app',
-          current: 'feature/project-detect',
-          dirty: false,
-          branches: [
-            { name: 'feature/project-detect', current: true, upstream: 'origin/feature/project-detect' },
-            { name: 'main', current: false, upstream: 'origin/main' }
-          ]
-        })
+      getRuntimeStatus: vi.fn().mockResolvedValue({ status: 'stopped', log: '', branch: 'feature/project-detect', dirty: false }),
+      listProjectBranches: vi.fn().mockResolvedValue({
+        cwd: '/repos/sample-app',
+        current: 'feature/project-detect',
+        dirty: false,
+        branches: [
+          { name: 'feature/project-detect', current: true, upstream: 'origin/feature/project-detect' },
+          { name: 'main', current: false, upstream: 'origin/main' }
+        ]
+      })
     }, projectOnlyConfig);
     const user = userEvent.setup();
     render(<App />);
@@ -310,9 +306,12 @@ describe('Launch Bay shell', () => {
 
     expect(screen.getByRole('heading', { name: 'sample-app server' })).toBeInTheDocument();
     expect(screen.getAllByText('/repos/sample-app').length).toBeGreaterThan(0);
-    expect(await screen.findAllByText('feature/project-detect')).toHaveLength(3);
-    expect(screen.getByText('origin/main')).toBeInTheDocument();
     expect(screen.getByRole('button', { name: 'Configure server' })).toBeInTheDocument();
+    expect(screen.queryByText('feature/project-detect')).not.toBeInTheDocument();
+    expect(screen.queryByText('origin/main')).not.toBeInTheDocument();
+    expect(screen.queryByRole('region', { name: 'Project config' })).not.toBeInTheDocument();
+    expect(api.getRuntimeStatus).not.toHaveBeenCalled();
+    expect(api.listProjectBranches).not.toHaveBeenCalled();
   });
 
   it('runs and edits a configured server by server id when it differs from the workspace id', async () => {
@@ -698,22 +697,174 @@ describe('Launch Bay shell', () => {
     expect(screen.getByText('api :3333 · web :5173')).toBeInTheDocument();
   });
 
-  it('keeps a right-side Git changes workbench beside the Hermes chat', async () => {
-    const api = installLaunchBayMock();
+  it('does not show branch changes beside Hermes when the selected project has no server', async () => {
+    const projectOnlyConfig: TestLaunchBayConfig = {
+      version: 1,
+      localUser: { id: 'local-test', createdAt: '2026-01-01T00:00:00.000Z', updatedAt: '2026-01-01T00:00:00.000Z', onboardingCompleted: true },
+      workspaces: [{ id: 'sample-app', name: 'sample-app', cwd: '/repos/sample-app', createdAt: '2026-01-01T00:00:00.000Z', updatedAt: '2026-01-01T00:00:00.000Z' }],
+      servers: []
+    };
+    const api = installLaunchBayMock({
+      getLaunchBayConfig: vi.fn().mockResolvedValue(projectOnlyConfig),
+      getProjectGitSnapshot: vi.fn().mockResolvedValue({
+        cwd: '/repos/sample-app',
+        branch: 'feature/project-only',
+        headSha: 'abc123',
+        isDirty: true,
+        isMerging: false,
+        isRebasing: false,
+        isCherryPicking: false,
+        files: [{ path: 'src/App.tsx', status: 'modified', staged: false, unstaged: true }],
+        conflicts: []
+      })
+    }, projectOnlyConfig);
+
     render(<App />);
 
-    const compactCard = await screen.findByRole('button', { name: /Expand changes workbench/i });
-    fireEvent.click(compactCard);
+    expect(await screen.findByRole('textbox', { name: /Message Hermes about sample-app/i })).toBeInTheDocument();
+    expect(screen.queryByRole('button', { name: /Expand changes workbench/i })).not.toBeInTheDocument();
+    expect(screen.queryByRole('complementary', { name: 'Changes workbench' })).not.toBeInTheDocument();
+    expect(screen.queryByText('main')).not.toBeInTheDocument();
+    expect(api.getProjectGitSnapshot).not.toHaveBeenCalled();
+    expect(api.getRuntimeStatus).not.toHaveBeenCalled();
+    expect(api.listProjectBranches).not.toHaveBeenCalled();
+  });
 
-    const workbench = await screen.findByRole('complementary', { name: 'Changes workbench' });
+  it('keeps Git change cards in the sidebar and opens the right-side workbench on demand', async () => {
+    const config: TestLaunchBayConfig = {
+      version: 1,
+      localUser: { id: 'local-test', createdAt: '2026-01-01T00:00:00.000Z', updatedAt: '2026-01-01T00:00:00.000Z', onboardingCompleted: true },
+      workspaces: [{ id: 'workspace-sample', name: 'Sample', cwd: '/repos/sample', createdAt: '2026-01-01T00:00:00.000Z', updatedAt: '2026-01-01T00:00:00.000Z' }],
+      servers: [{
+        id: 'server-api',
+        workspaceId: 'workspace-sample',
+        name: 'Sample API',
+        cwd: '/repos/sample-api',
+        command: 'pnpm api',
+        url: 'http://localhost:3333',
+        createdAt: '2026-01-01T00:00:00.000Z',
+        updatedAt: '2026-01-01T00:00:00.000Z'
+      }, {
+        id: 'server-web',
+        workspaceId: 'workspace-sample',
+        name: 'Sample Web',
+        cwd: '/repos/sample-web',
+        command: 'pnpm web',
+        url: 'http://localhost:5173',
+        createdAt: '2026-01-01T00:00:00.000Z',
+        updatedAt: '2026-01-01T00:00:00.000Z'
+      }]
+    };
+    const api = installLaunchBayMock({
+      getLaunchBayConfig: vi.fn().mockResolvedValue(config),
+      getRuntimeStatus: vi.fn().mockImplementation(async (runtimeId: string) => ({
+        status: 'stopped',
+        log: '',
+        branch: runtimeId === 'server-web' ? 'feature/web-ui' : 'feature/api-contract',
+        dirty: runtimeId === 'server-web'
+      })),
+      listProjectBranches: vi.fn().mockImplementation(async (runtimeId: string) => ({
+        cwd: runtimeId === 'server-web' ? '/repos/sample-web' : '/repos/sample-api',
+        current: runtimeId === 'server-web' ? 'feature/web-ui' : 'feature/api-contract',
+        dirty: runtimeId === 'server-web',
+        branches: [{ name: runtimeId === 'server-web' ? 'feature/web-ui' : 'feature/api-contract', current: true }]
+      })),
+      getProjectGitSnapshot: vi.fn().mockImplementation(async (runtimeId: string) => ({
+        cwd: runtimeId === 'server-web' ? '/repos/sample-web' : '/repos/sample-api',
+        branch: runtimeId === 'server-web' ? 'feature/web-ui' : 'feature/api-contract',
+        headSha: runtimeId === 'server-web' ? 'web123' : 'api123',
+        upstream: runtimeId === 'server-web' ? 'origin/feature/web-ui' : 'origin/feature/api-contract',
+        ahead: runtimeId === 'server-web' ? 0 : 1,
+        behind: runtimeId === 'server-web' ? 2 : 0,
+        isDirty: true,
+        isMerging: false,
+        isRebasing: false,
+        isCherryPicking: false,
+        files: [{ path: runtimeId === 'server-web' ? 'src/Web.tsx' : 'src/Api.ts', status: 'modified', staged: false, unstaged: true }],
+        conflicts: []
+      })),
+      getProjectFileDiff: vi.fn().mockImplementation(async (runtimeId: string, path: string, kind: string) => ({
+        path,
+        kind,
+        diff: runtimeId === 'server-web'
+          ? 'diff --git a/src/Web.tsx b/src/Web.tsx\n@@ -1 +1 @@\n-old web\n+new web\n'
+          : 'diff --git a/src/Api.ts b/src/Api.ts\n@@ -1 +1 @@\n-old api\n+new api\n'
+      }))
+    }, config);
+    render(<App />);
+
+    await waitFor(() => {
+      expect(api.getProjectGitSnapshot).toHaveBeenCalledWith('server-api');
+      expect(api.getProjectGitSnapshot).toHaveBeenCalledWith('server-web');
+    });
+    expect(api.getProjectGitSnapshot).not.toHaveBeenCalledWith('workspace-sample');
+
+    const changesNav = await screen.findByRole('group', { name: 'Changes' });
+    const compactCards = within(changesNav).getAllByRole('button', { name: /Expand changes workbench/i });
+    expect(compactCards).toHaveLength(2);
+    expect(compactCards[0]).toHaveTextContent('Sample API');
+    expect(compactCards[0]).toHaveTextContent('feature/api-contract');
+    expect(compactCards[0]).toHaveTextContent('1 file');
+    expect(compactCards[1]).toHaveTextContent('Sample Web');
+    expect(compactCards[1]).toHaveTextContent('feature/web-ui');
+    expect(compactCards[1]).toHaveTextContent('1 file');
+
+    expect(screen.queryByRole('complementary', { name: /Changes workbench/i })).not.toBeInTheDocument();
+
+    fireEvent.click(compactCards[0]);
+    let workbench = await screen.findByRole('complementary', { name: 'Changes workbench for Sample API' });
+    expect(within(changesNav).getAllByRole('button', { name: /Expand changes workbench/i })).toHaveLength(2);
     expect(within(workbench).getByRole('heading', { name: 'Changes' })).toBeInTheDocument();
     expect(within(workbench).getByText('Local changes')).toBeInTheDocument();
-    expect(within(workbench).getByText('main')).toBeInTheDocument();
-    expect(within(workbench).getAllByText('src/App.tsx').length).toBeGreaterThan(0);
-    expect(within(workbench).getByText('src/NewPanel.tsx')).toBeInTheDocument();
-    expect(await within(workbench).findByLabelText('Diff for src/App.tsx')).toHaveTextContent('+new');
-    expect(api.getProjectGitSnapshot).toHaveBeenCalledWith('sample');
-    expect(api.getProjectFileDiff).toHaveBeenCalledWith('sample', 'src/App.tsx', 'worktree');
+    expect(within(workbench).getByText('feature/api-contract')).toBeInTheDocument();
+    expect(within(workbench).getAllByText('src/Api.ts').length).toBeGreaterThan(0);
+    expect(await within(workbench).findByLabelText('Diff for src/Api.ts')).toHaveTextContent('+new api');
+    expect(api.getProjectFileDiff).toHaveBeenCalledWith('server-api', 'src/Api.ts', 'worktree');
+
+    fireEvent.click(compactCards[1]);
+    workbench = await screen.findByRole('complementary', { name: 'Changes workbench for Sample Web' });
+    expect(within(workbench).getByText('feature/web-ui')).toBeInTheDocument();
+    expect(await within(workbench).findByLabelText('Diff for src/Web.tsx')).toHaveTextContent('+new web');
+    expect(api.getProjectFileDiff).toHaveBeenCalledWith('server-web', 'src/Web.tsx', 'worktree');
+
+    fireEvent.click(within(workbench).getByRole('button', { name: 'Minimize changes workbench' }));
+    await waitFor(() => expect(screen.queryByRole('complementary', { name: /Changes workbench/i })).not.toBeInTheDocument());
+    expect(within(changesNav).getAllByRole('button', { name: /Expand changes workbench/i })).toHaveLength(2);
+  });
+
+  it('keeps file clicks inline and opens the tabbed diff review from the summary action', async () => {
+    const api = installLaunchBayMock({
+      getProjectFileDiff: vi.fn().mockImplementation(async (_projectId: string, path: string, kind: string) => ({
+        path,
+        kind,
+        diff: path === 'src/NewPanel.tsx'
+          ? 'diff --git a/src/NewPanel.tsx b/src/NewPanel.tsx\n@@ -0,0 +1 @@\n+new panel modal\n'
+          : 'diff --git a/src/App.tsx b/src/App.tsx\n@@ -1 +1 @@\n-old app\n+app modal\n'
+      }))
+    });
+    render(<App />);
+
+    fireEvent.click(await screen.findByRole('button', { name: /Expand changes workbench/i }));
+    const workbench = await screen.findByRole('complementary', { name: 'Changes workbench' });
+    expect(await within(workbench).findByLabelText('Diff for src/App.tsx')).toHaveTextContent('+app modal');
+
+    fireEvent.click(within(workbench).getByRole('button', { name: 'New src/NewPanel.tsx' }));
+
+    expect(screen.queryByRole('dialog', { name: 'Diff review' })).not.toBeInTheDocument();
+    expect(await within(workbench).findByLabelText('Diff for src/NewPanel.tsx')).toHaveTextContent('+new panel modal');
+    expect(api.getProjectFileDiff).toHaveBeenCalledWith('sample', 'src/NewPanel.tsx', 'untracked');
+
+    fireEvent.click(within(workbench).getByRole('button', { name: 'Ver todos os arquivos' }));
+
+    const dialog = await screen.findByRole('dialog', { name: 'Diff review' });
+    expect(within(dialog).getByRole('tab', { name: 'src/NewPanel.tsx' })).toHaveAttribute('aria-selected', 'true');
+    expect(await within(dialog).findByLabelText('Full diff for src/NewPanel.tsx')).toHaveTextContent('+new panel modal');
+
+    fireEvent.click(within(dialog).getByRole('button', { name: 'Modified src/App.tsx' }));
+
+    expect(within(dialog).getByRole('tab', { name: 'src/NewPanel.tsx' })).toBeInTheDocument();
+    expect(within(dialog).getByRole('tab', { name: 'src/App.tsx' })).toHaveAttribute('aria-selected', 'true');
+    expect(await within(dialog).findByLabelText('Full diff for src/App.tsx')).toHaveTextContent('+app modal');
   });
 
   it('keeps the collapsed changes card fresh without touching an expanded diff review', async () => {
@@ -750,7 +901,7 @@ describe('Launch Bay shell', () => {
 
     fireEvent.click(compactCard);
     const workbench = await screen.findByRole('complementary', { name: 'Changes workbench' });
-    expect(within(workbench).getByText('feature/active')).toBeInTheDocument();
+    expect(within(workbench).getByText('Changes')).toBeInTheDocument();
 
     vi.mocked(api.getProjectGitSnapshot).mockClear();
     await act(async () => {
@@ -770,7 +921,7 @@ describe('Launch Bay shell', () => {
 
     const workbench = await screen.findByRole('complementary', { name: 'Changes workbench' });
     expect(await within(workbench).findByLabelText('Diff for src/App.tsx')).toHaveTextContent('+new');
-    expect(api.getProjectGitSnapshot).toHaveBeenCalledTimes(1);
+    expect(api.getProjectGitSnapshot).toHaveBeenCalledTimes(2);
 
     vi.useFakeTimers();
     vi.mocked(api.getProjectGitSnapshot).mockClear();
@@ -859,9 +1010,26 @@ describe('Launch Bay shell', () => {
     expect(within(workbench).getByText('conflicts')).toBeInTheDocument();
   });
 
-  it('shows a GitLens-style branch manager with search, fetch, quick switch, and merge actions', async () => {
+  it('shows a guided branch merge flow with direction, repository, metadata, preview, and safe confirmation', async () => {
     const user = userEvent.setup();
-    const api = installLaunchBayMock();
+    const mergePreview = {
+      cwd: '/repos/sample-app',
+      sourceBranch: 'feature/session-cockpit',
+      targetBranch: 'main',
+      canMerge: true,
+      blockers: [],
+      commits: [
+        { sha: 'def4567', subject: 'Polish session cockpit' },
+        { sha: 'abc1234', subject: 'Wire branch actions' }
+      ],
+      files: [
+        { path: 'src/components/Sidebar.tsx', status: 'M' },
+        { path: 'src/components/NewSessionModal.tsx', status: 'A' }
+      ]
+    };
+    const api = installLaunchBayMock({
+      getProjectBranchMergePreview: vi.fn().mockResolvedValue(mergePreview)
+    } as Partial<NonNullable<Window['launchBay']>>);
 
     render(<App />);
     await user.click(screen.getByRole('button', { name: 'Server' }));
@@ -886,18 +1054,46 @@ describe('Launch Bay shell', () => {
     await user.click(within(config).getByRole('button', { name: 'Fetch' }));
     expect(api.fetchProjectBranches).toHaveBeenCalledWith('sample');
 
-    await user.click(within(config).getByRole('button', { name: 'Merge feature/session-cockpit into main' }));
-    expect(api.mergeProjectBranch).not.toHaveBeenCalled();
-    const mergeDialog = await screen.findByRole('dialog', { name: 'Confirm merge' });
-    expect(within(mergeDialog).getAllByText('feature/session-cockpit').length).toBeGreaterThan(0);
-    expect(within(mergeDialog).getAllByText('main').length).toBeGreaterThan(0);
-    await user.click(within(mergeDialog).getByRole('button', { name: 'Cancel' }));
+    const mergeAction = within(config).getByRole('button', { name: 'Merge feature/session-cockpit into current branch main' });
+    expect(mergeAction).toHaveTextContent('Merge into current');
+    await user.click(mergeAction);
     expect(api.mergeProjectBranch).not.toHaveBeenCalled();
 
-    await user.click(within(config).getByRole('button', { name: 'Merge feature/session-cockpit into main' }));
-    const confirmDialog = await screen.findByRole('dialog', { name: 'Confirm merge' });
-    await user.click(within(confirmDialog).getByRole('button', { name: 'Confirm merge' }));
+    const mergeDialog = await screen.findByRole('dialog', { name: 'Review branch merge' });
+    expect(within(mergeDialog).getByText('Source branch')).toBeInTheDocument();
+    expect(within(mergeDialog).getByText('Current target branch')).toBeInTheDocument();
+    expect(within(mergeDialog).getAllByText('feature/session-cockpit').length).toBeGreaterThan(0);
+    expect(within(mergeDialog).getAllByText('main').length).toBeGreaterThan(0);
+    expect(within(mergeDialog).getByText('/repos/sample-app')).toBeInTheDocument();
+    expect(within(mergeDialog).getByText('Branch UI')).toBeInTheDocument();
+    expect(within(mergeDialog).getByText('behind 2')).toBeInTheDocument();
+    expect(within(mergeDialog).getByText((_, element) =>
+      element?.classList.contains('merge-copy') === true &&
+        element.textContent?.replace(/\s+/g, ' ').includes('You will stay on main') === true
+    )).toBeInTheDocument();
+    expect(within(mergeDialog).getByText('git merge --no-edit feature/session-cockpit')).toBeInTheDocument();
+    await waitFor(() => expect((api as any).getProjectBranchMergePreview).toHaveBeenCalledWith('sample', 'feature/session-cockpit'));
+    expect(within(mergeDialog).getByRole('heading', { name: 'Preflight checks' })).toBeInTheDocument();
+    expect(within(mergeDialog).getByText('Worktree clean')).toBeInTheDocument();
+    expect(within(mergeDialog).getByText('Server stopped')).toBeInTheDocument();
+    expect(within(mergeDialog).getByRole('heading', { name: 'Merge preview' })).toBeInTheDocument();
+    expect(within(mergeDialog).getByText('2 commits')).toBeInTheDocument();
+    expect(within(mergeDialog).getByText('2 files')).toBeInTheDocument();
+    expect(within(mergeDialog).getByText('Polish session cockpit')).toBeInTheDocument();
+    expect(within(mergeDialog).getByText('src/components/Sidebar.tsx')).toBeInTheDocument();
+    await user.keyboard('{Escape}');
+    expect(api.mergeProjectBranch).not.toHaveBeenCalled();
+
+    await user.click(within(config).getByRole('button', { name: 'Merge feature/session-cockpit into current branch main' }));
+    const cancelDialog = await screen.findByRole('dialog', { name: 'Review branch merge' });
+    await user.click(within(cancelDialog).getByRole('button', { name: 'Cancel' }));
+    expect(api.mergeProjectBranch).not.toHaveBeenCalled();
+
+    await user.click(within(config).getByRole('button', { name: 'Merge feature/session-cockpit into current branch main' }));
+    const confirmDialog = await screen.findByRole('dialog', { name: 'Review branch merge' });
+    await user.click(within(confirmDialog).getByRole('button', { name: 'Merge feature/session-cockpit into main' }));
     expect(api.mergeProjectBranch).toHaveBeenCalledWith('sample', 'feature/session-cockpit');
+    expect(await within(config).findByText(/Merged feature\/session-cockpit into main/i)).toBeInTheDocument();
 
     await user.click(within(config).getByRole('button', { name: 'Switch to feature/session-cockpit' }));
     expect(api.switchProjectBranch).toHaveBeenCalledWith('sample', 'feature/session-cockpit');
@@ -1218,10 +1414,11 @@ describe('Launch Bay shell', () => {
     render(<App />);
 
     expect(screen.getByRole('button', { name: 'Open Hermes' })).toBeInTheDocument();
-    expect(screen.getByRole('button', { name: 'Rename Hermes' })).toBeInTheDocument();
+    expect(screen.getByRole('button', { name: 'Session actions for Hermes' })).toBeInTheDocument();
     expect(screen.queryByRole('button', { name: 'Hermes' })).not.toBeInTheDocument();
 
-    await user.click(screen.getByRole('button', { name: 'Rename Hermes' }));
+    await user.click(screen.getByRole('button', { name: 'Session actions for Hermes' }));
+    await user.click(screen.getByRole('menuitem', { name: 'Edit session' }));
     const renameInput = screen.getByRole('textbox', { name: 'Rename session' });
     await user.clear(renameInput);
     await user.type(renameInput, 'Planning Hermes{Enter}');
@@ -1281,7 +1478,8 @@ describe('Launch Bay shell', () => {
     await user.type(screen.getByLabelText('Session name'), 'UI Claude');
     await user.click(screen.getByRole('button', { name: 'Create session' }));
 
-    await user.click(screen.getByRole('button', { name: 'Rename UI Claude' }));
+    await user.click(screen.getByRole('button', { name: 'Session actions for UI Claude' }));
+    await user.click(screen.getByRole('menuitem', { name: 'Edit session' }));
     const renameInput = screen.getByRole('textbox', { name: 'Rename session' });
     await user.clear(renameInput);
     await user.type(renameInput, 'Database Claude{Enter}');
@@ -1291,31 +1489,86 @@ describe('Launch Bay shell', () => {
     expect(screen.queryByRole('button', { name: 'Open UI Claude' })).not.toBeInTheDocument();
   });
 
-  it('creates Hermes agent sessions from the sidebar and routes messages through the Electron bridge', async () => {
+  it('creates Hermes agent sessions as isolated full Hermes chat surfaces with the same composer controls', async () => {
     const user = userEvent.setup();
-    const api = installLaunchBayMock();
+    const pickedResource = {
+      id: 'resource-notes',
+      uri: 'file:///repos/sample-app/notes.md',
+      mimeType: 'text/markdown',
+      name: 'notes.md',
+      text: '# Notes',
+      sizeBytes: 7
+    };
+    const api = installLaunchBayMock({
+      chooseAttachmentFile: vi.fn().mockResolvedValue({ canceled: false, resource: pickedResource }),
+      listHermesSessions: vi.fn().mockResolvedValue({ sessions: [] }),
+      resumeHermesSession: vi.fn().mockResolvedValue({ messages: [], pending: false }),
+      setHermesApprovalMode: vi.fn().mockResolvedValue({ ok: true }),
+      sendHermesInstanceMessage: vi.fn().mockImplementation(async (_instanceId: string, text: string) => ({
+        messages: [
+          { id: 'iu1', role: 'user', text },
+          { id: 'ia1', role: 'assistant', text: `## Agent answer\n\nEmbedded Hermes reply: ${text}` }
+        ],
+        pending: false,
+        contextUsage: { promptTokens: 20, completionTokens: 2, totalTokens: 22, contextLength: 100, percent: 22 }
+      }))
+    });
 
     render(<App />);
     await user.click(screen.getByRole('button', { name: 'New session' }));
-    await user.clear(screen.getByLabelText('Session name'));
-    await user.type(screen.getByLabelText('Session name'), 'Extra Hermes');
+    expect(screen.getByLabelText('Session name')).toHaveValue('Hermes 2');
     await user.click(screen.getByRole('button', { name: 'Create session' }));
 
     expect(api.createHermesInstance).toHaveBeenCalledWith('sample');
-    expect(screen.getByRole('button', { name: 'Open Extra Hermes' })).toBeInTheDocument();
+    expect(screen.getByRole('button', { name: 'Open Hermes 2' })).toBeInTheDocument();
+    expect(screen.getAllByRole('button', { name: 'Open Hermes' })).toHaveLength(1);
 
-    const sessionView = await screen.findByRole('region', { name: 'Extra Hermes' });
-    const messageInput = within(sessionView).getByRole('textbox', { name: 'Message Extra Hermes' });
+    const sessionView = await screen.findByRole('region', { name: 'Sample Hermes 2' });
+    expect(sessionView).toHaveClass('chat-view');
+    expect(within(sessionView).queryByText('Type')).not.toBeInTheDocument();
+    expect(within(sessionView).queryByText('Command')).not.toBeInTheDocument();
+    expect(within(sessionView).getByLabelText('Hermes context usage')).toHaveTextContent('Context —');
+    expect(within(sessionView).getByRole('checkbox', { name: 'Manual approval' })).toBeInTheDocument();
+    expect(within(sessionView).getByRole('button', { name: 'Past sessions' })).toHaveTextContent('History');
+    expect(within(sessionView).getByRole('button', { name: 'Attach file' })).toHaveTextContent('Attach');
+
+    await user.click(within(sessionView).getByRole('checkbox', { name: 'Manual approval' }));
+    expect(api.setHermesApprovalMode).toHaveBeenCalledWith('manual');
+
+    await user.click(within(sessionView).getByRole('button', { name: 'Attach file' }));
+    expect(await within(sessionView).findByText('notes.md')).toBeInTheDocument();
+
+    const messageInput = within(sessionView).getByRole('textbox', { name: 'Message Hermes 2 about Sample' });
     await user.type(messageInput, 'status now{Enter}');
 
-    expect(api.sendHermesInstanceMessage).toHaveBeenCalledWith('hermes-1', 'status now');
-    expect(await within(sessionView).findByText('Embedded Hermes reply: status now')).toBeInTheDocument();
+    expect(api.sendHermesInstanceMessage).toHaveBeenCalledWith('hermes-1', 'status now', undefined, [pickedResource]);
+    expect(await within(sessionView).findByRole('heading', { level: 2, name: 'Agent answer' })).toBeInTheDocument();
+    expect(within(sessionView).getByText('Embedded Hermes reply: status now')).toBeInTheDocument();
 
-    await user.click(within(sessionView).getByRole('button', { name: 'Reset' }));
+    const composer = sessionView.querySelector('.composer-bottom') as HTMLElement;
+    await user.click(within(composer).getByRole('button', { name: 'Reset session' }));
     expect(api.resetHermesInstance).toHaveBeenCalledWith('hermes-1');
-    await user.click(within(sessionView).getByRole('button', { name: 'Close' }));
+    expect(within(composer).queryByRole('button', { name: 'Close session' })).not.toBeInTheDocument();
+
+    await user.click(screen.getByRole('button', { name: 'Session actions for Hermes 2' }));
+    expect(screen.getByRole('menuitem', { name: 'Edit session' })).toBeInTheDocument();
+    await user.click(within(sessionView).getByRole('heading', { name: 'What do you want to work on?' }));
+    expect(screen.queryByRole('menuitem', { name: 'Edit session' })).not.toBeInTheDocument();
+    expect(screen.queryByRole('menuitem', { name: 'Kill session' })).not.toBeInTheDocument();
+
+    await user.click(screen.getByRole('button', { name: 'Session actions for Hermes 2' }));
+    await user.click(screen.getByRole('menuitem', { name: 'Kill session' }));
+    const confirmDialog = await screen.findByRole('dialog', { name: 'Kill Hermes 2 session?' });
+    expect(within(confirmDialog).getByText(/This will close the Hermes 2 session and discard its current context/i)).toBeInTheDocument();
+    await user.click(within(confirmDialog).getByRole('button', { name: 'Cancel' }));
+    expect(api.closeHermesInstance).not.toHaveBeenCalled();
+    expect(screen.getByRole('button', { name: 'Open Hermes 2' })).toBeInTheDocument();
+
+    await user.click(screen.getByRole('button', { name: 'Session actions for Hermes 2' }));
+    await user.click(screen.getByRole('menuitem', { name: 'Kill session' }));
+    await user.click(within(await screen.findByRole('dialog', { name: 'Kill Hermes 2 session?' })).getByRole('button', { name: 'Kill session' }));
     expect(api.closeHermesInstance).toHaveBeenCalledWith('hermes-1');
-    expect(screen.queryByRole('button', { name: 'Open Extra Hermes' })).not.toBeInTheDocument();
+    expect(screen.queryByRole('button', { name: 'Open Hermes 2' })).not.toBeInTheDocument();
   });
 
   it('shows local-first setup when no native bridge is available', () => {
@@ -1338,6 +1591,27 @@ describe('Launch Bay shell', () => {
     expect(api.sendHermesMessage).toHaveBeenCalledWith('sample', 'Status of OT?');
     expect(await screen.findByText('Status of OT?')).toBeInTheDocument();
     expect(await screen.findByText(/Hermes reply for sample: Status of OT\?/)).toBeInTheDocument();
+  });
+
+  it('turns the Hermes send button into a stop control while the LLM is thinking', async () => {
+    const api = installLaunchBayMock({
+      sendHermesMessage: vi.fn().mockReturnValue(new Promise(() => undefined)),
+      cancelHermesPrompt: vi.fn().mockResolvedValue({ ok: true })
+    });
+    const user = userEvent.setup();
+    render(<App />);
+
+    await user.type(screen.getByPlaceholderText(/Ask Hermes about Sample/i), 'Long task');
+    await user.click(screen.getByRole('button', { name: 'Send' }));
+
+    const stopButton = await screen.findByRole('button', { name: 'Stop Hermes' });
+    expect(stopButton).toHaveClass('primary');
+    expect(stopButton).toHaveTextContent('■');
+    expect(screen.queryByRole('button', { name: 'Send' })).not.toBeInTheDocument();
+
+    await user.click(stopButton);
+
+    expect(api.cancelHermesPrompt).toHaveBeenCalledWith('sample');
   });
 
   it('renders Hermes assistant replies as integrated markdown content', async () => {
@@ -1476,7 +1750,8 @@ describe('Launch Bay shell', () => {
     expect(status).toHaveTextContent(/Thinking through the context/i);
     expect(status).toHaveTextContent('00:00');
     expect(status).not.toHaveTextContent('Hermes');
-    expect(screen.getByRole('button', { name: 'Send' })).toBeDisabled();
+    expect(screen.getByRole('button', { name: 'Stop Hermes' })).toHaveClass('primary');
+    expect(screen.queryByRole('button', { name: 'Send' })).not.toBeInTheDocument();
 
     await act(async () => {
       vi.advanceTimersByTime(7000);

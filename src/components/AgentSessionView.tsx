@@ -15,7 +15,6 @@ type AgentSessionViewProps = {
   onDraftChange: (value: string) => void;
   onSend: () => void;
   onReset: () => void;
-  onClose: () => void;
 };
 
 export function AgentSessionView({
@@ -24,8 +23,7 @@ export function AgentSessionView({
   toolLabel,
   onDraftChange,
   onSend,
-  onReset,
-  onClose
+  onReset
 }: AgentSessionViewProps) {
   return (
     <section className="agent-session-view" aria-label={session.name}>
@@ -37,7 +35,6 @@ export function AgentSessionView({
         </div>
         <div className="server-actions">
           <button className="secondary" type="button" onClick={onReset}>Reset</button>
-          <button className="secondary" type="button" onClick={onClose}>Close</button>
         </div>
       </div>
       <div className="runtime-grid agent-session-details">

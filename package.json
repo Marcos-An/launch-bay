@@ -10,6 +10,8 @@
     "dev": "NODE_ENV=development pnpm build:electron && concurrently -k \"vite --host 127.0.0.1\" \"wait-on http://127.0.0.1:5173 && electron .\"",
     "build:electron": "tsc -p electron/tsconfig.json && cp electron/preload.cjs dist-electron/preload.cjs",
     "build": "tsc -b && vite build && pnpm build:electron",
+    "package:mac": "pnpm build && electron-builder --mac dir",
+    "dist:mac": "pnpm build && electron-builder --mac dmg",
     "test": "NODE_ENV=test vitest run",
     "test:watch": "vitest",
     "typecheck": "tsc -b && tsc -p electron/tsconfig.json"
@@ -19,7 +21,6 @@
     "@xterm/addon-fit": "^0.11.0",
     "@xterm/xterm": "^6.0.0",
     "concurrently": "latest",
-    "electron": "latest",
     "node-pty": "^1.1.0",
     "react": "18.3.1",
     "react-dom": "18.3.1",
@@ -35,7 +36,33 @@
     "@types/node": "latest",
     "@types/react": "18.3.18",
     "@types/react-dom": "18.3.5",
+    "electron": "^42.0.1",
+    "electron-builder": "^26.8.1",
     "jsdom": "latest",
     "vitest": "latest"
+  },
+  "build": {
+    "appId": "com.launchbay.app",
+    "productName": "Launch Bay",
+    "directories": {
+      "output": "release"
+    },
+    "files": [
+      "dist/**",
+      "dist-electron/**",
+      "package.json",
+      "!dist-electron/**/*.test.js",
+      "!**/*.map"
+    ],
+    "mac": {
+      "target": [
+        "dir"
+      ],
+      "category": "public.app-category.developer-tools",
+      "icon": "build-resources/icon.icns"
+    },
+    "asarUnpack": [
+      "node_modules/node-pty/**"
+    ]
   }
 }

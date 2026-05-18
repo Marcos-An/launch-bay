@@ -47,6 +47,7 @@ describe('Electron preload bridge packaging', () => {
     expect(preloadSource).toContain('fetchProjectBranches');
     expect(preloadSource).toContain('switchProjectBranch');
     expect(preloadSource).toContain('mergeProjectBranch');
+    expect(preloadSource).toContain('getProjectBranchMergePreview');
     expect(preloadSource).toContain('launch-bay:hermes-instance-create');
     expect(preloadSource).toContain('launch-bay:config-get');
     expect(preloadSource).toContain('launch-bay:workspace-save');
@@ -59,6 +60,7 @@ describe('Electron preload bridge packaging', () => {
     expect(preloadSource).toContain('launch-bay:project-branches-fetch');
     expect(preloadSource).toContain('launch-bay:project-branch-switch');
     expect(preloadSource).toContain('launch-bay:project-branch-merge');
+    expect(preloadSource).toContain('launch-bay:project-branch-merge-preview');
   });
 
   it('registers local project shell IPC handlers in the Electron main process', () => {
@@ -82,6 +84,7 @@ describe('Electron preload bridge packaging', () => {
     expect(mainSource).toContain("ipcMain.handle('launch-bay:project-branches-fetch'");
     expect(mainSource).toContain("ipcMain.handle('launch-bay:project-branch-switch'");
     expect(mainSource).toContain("ipcMain.handle('launch-bay:project-branch-merge'");
+    expect(mainSource).toContain("ipcMain.handle('launch-bay:project-branch-merge-preview'");
     expect(mainSource).toContain('shell.openExternal');
     expect(mainSource).toContain('terminalManager.create');
     expect(mainSource).toContain('getHermesInstanceManager().create');

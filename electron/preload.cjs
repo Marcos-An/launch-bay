@@ -73,6 +73,7 @@ contextBridge.exposeInMainWorld('launchBay', {
   fetchProjectBranches: (projectId) => ipcRenderer.invoke('launch-bay:project-branches-fetch', projectId),
   switchProjectBranch: (projectId, branch) => ipcRenderer.invoke('launch-bay:project-branch-switch', projectId, branch),
   mergeProjectBranch: (projectId, branch) => ipcRenderer.invoke('launch-bay:project-branch-merge', projectId, branch),
+  getProjectBranchMergePreview: (projectId, branch) => ipcRenderer.invoke('launch-bay:project-branch-merge-preview', projectId, branch),
   getProjectGitSnapshot: (projectId) => ipcRenderer.invoke('launch-bay:project-git-snapshot', projectId),
   getProjectFileDiff: (projectId, filePath, kind) => ipcRenderer.invoke('launch-bay:project-file-diff', projectId, filePath, kind),
   onHermesInstanceUpdate: (callback) => {

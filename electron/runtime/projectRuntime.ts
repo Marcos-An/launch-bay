@@ -59,6 +59,27 @@ export type ProjectBranchState = {
   runtime?: RuntimeSnapshot;
 };
 
+export type GitMergePreviewCommit = {
+  sha: string;
+  subject: string;
+};
+
+export type GitMergePreviewFile = {
+  path: string;
+  status: string;
+};
+
+export type GitMergePreview = {
+  cwd: string;
+  sourceBranch: string;
+  targetBranch?: string;
+  canMerge: boolean;
+  blockers: string[];
+  commits: GitMergePreviewCommit[];
+  files: GitMergePreviewFile[];
+  error?: string;
+};
+
 type RuntimeListener = (event: RuntimeUpdate) => void;
 
 type SpawnProcess = (command: string, args: string[], options: SpawnOptionsWithoutStdio) => ChildProcess;
@@ -244,6 +265,77 @@ export function mergeGitBranch(cwd: string, branch: string) {
     encoding: 'utf8',
     stdio: ['ignore', 'pipe', 'pipe']
   });
+}
+
+function gitOutput(cwd: string, args: string[]) {
+  return execFileSync('git', ['-C', cwd, ...args], {
+    encoding: 'utf8',
+    stdio: ['ignore', 'pipe', 'pipe']
+  });
+}
+
+function parseMergePreviewFiles(output: string): GitMergePreviewFile[] {
+  return output
+    .split(/\r?\n/)
+    .map((line) => line.trim())
+    .filter(Boolean)
+    .map((line) => {
+      const [status, ...paths] = line.split('\t');
+      return { status, path: paths[paths.length - 1] ?? '' };
+    })
+    .filter((file) => file.path.length > 0);
+}
+
+function parseMergePreviewCommits(output: string): GitMergePreviewCommit[] {
+  return output
+    .split(/\r?\n/)
+    .map((line) => line.trim())
+    .filter(Boolean)
+    .map((line) => {
+      const [sha, subject = ''] = line.split('\t');
+      return { sha, subject };
+    });
+}
+
+export function resolveGitMergePreview(cwd: string, sourceBranch: string): GitMergePreview {
+  const source = sourceBranch.trim();
+  const targetBranch = resolveGitBranch(cwd);
+  const blockers: string[] = [];
+  if (!source) blockers.push('Choose a source branch before merging.');
+  if (!targetBranch) blockers.push('Current branch could not be resolved.');
+  if (source && targetBranch && source === targetBranch) blockers.push('Choose another branch to merge into the current branch.');
+  if (resolveGitDirty(cwd)) blockers.push('Commit or stash before merging branches.');
+
+  if (!source || !targetBranch) {
+    return { cwd, sourceBranch: source, targetBranch, canMerge: false, blockers, commits: [], files: [] };
+  }
+
+  try {
+    gitOutput(cwd, ['rev-parse', '--verify', source]);
+    const commits = parseMergePreviewCommits(gitOutput(cwd, ['log', '--format=%h%x09%s', `${targetBranch}..${source}`]));
+    const files = parseMergePreviewFiles(gitOutput(cwd, ['diff', '--name-status', `${targetBranch}...${source}`]));
+    return {
+      cwd,
+      sourceBranch: source,
+      targetBranch,
+      canMerge: blockers.length === 0,
+      blockers,
+      commits,
+      files
+    };
+  } catch (error) {
+    const message = error instanceof Error ? error.message : String(error);
+    return {
+      cwd,
+      sourceBranch: source,
+      targetBranch,
+      canMerge: false,
+      blockers: [...blockers, message],
+      commits: [],
+      files: [],
+      error: message
+    };
+  }
 }
 
 export function createProjectRuntimeConfig(config: RuntimeServerConfig): ProjectRuntimeConfig {
@@ -591,6 +683,30 @@ export class ProjectRuntimeManager {
       return { path: filePath, kind: kind ?? 'worktree', diff: '', error: 'Project runtime is not configured.' };
     }
     return getGitFileDiff(expandHome(config.cwd), filePath, kind);
+  }
+
+  getBranchMergePreview(projectId: string, branch: string): GitMergePreview {
+    const config = this.configs.get(projectId);
+    if (!config) {
+      return {
+        cwd: '',
+        sourceBranch: branch,
+        canMerge: false,
+        blockers: ['Project runtime is not configured.'],
+        commits: [],
+        files: [],
+        error: 'Project runtime is not configured.'
+      };
+    }
+    const preview = resolveGitMergePreview(expandHome(config.cwd), branch);
+    if (this.children.has(projectId)) {
+      return {
+        ...preview,
+        canMerge: false,
+        blockers: [...preview.blockers, 'Stop the server before merging branches.']
+      };
+    }
+    return preview;
   }
 
   fetchBranches(projectId: string): ProjectBranchState {

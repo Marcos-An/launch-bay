@@ -38,6 +38,15 @@ pnpm dev
 
 `pnpm dev` rebuilds the Electron main/preload bundle, starts Vite, and opens the desktop window. The browser preview at `http://127.0.0.1:5173` renders the UI but cannot run local processes — use the Electron window.
 
+To create a double-clickable macOS app without the Vite dev server:
+
+```bash
+pnpm package:mac
+open "release/mac-arm64/Launch Bay.app"
+```
+
+On Intel Macs the app path is `release/mac/Launch Bay.app`. You can drag the generated app to `/Applications` if you want to launch it from Spotlight/Finder.
+
 On first launch the sidebar is empty. Use **+ Open folder** to register a local project, then add servers and Hermes sessions from there.
 
 ## Validation

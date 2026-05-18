@@ -34,6 +34,27 @@ export type ProjectBranchState = {
   runtime?: RuntimeSnapshot;
 };
 
+export type GitMergePreviewCommit = {
+  sha: string;
+  subject: string;
+};
+
+export type GitMergePreviewFile = {
+  path: string;
+  status: string;
+};
+
+export type GitMergePreview = {
+  cwd: string;
+  sourceBranch: string;
+  targetBranch?: string;
+  canMerge: boolean;
+  blockers: string[];
+  commits: GitMergePreviewCommit[];
+  files: GitMergePreviewFile[];
+  error?: string;
+};
+
 export type LocalUserProfile = {
   id: string;
   displayName?: string;
@@ -327,6 +348,7 @@ export type LaunchBayBridge = {
   fetchProjectBranches: (projectId: string) => Promise<ProjectBranchState>;
   switchProjectBranch: (projectId: string, branch: string) => Promise<ProjectBranchState>;
   mergeProjectBranch: (projectId: string, branch: string) => Promise<ProjectBranchState>;
+  getProjectBranchMergePreview?: (projectId: string, branch: string) => Promise<GitMergePreview>;
   getProjectGitSnapshot: (projectId: string) => Promise<GitSnapshot>;
   getProjectFileDiff: (projectId: string, filePath: string, kind?: FileDiffKind) => Promise<FileDiff>;
   onRuntimeUpdate: (callback: (event: RuntimeUpdate) => void) => () => void;

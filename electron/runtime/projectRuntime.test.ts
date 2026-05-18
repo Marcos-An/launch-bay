@@ -1,10 +1,11 @@
 // @vitest-environment node
+import { execFileSync } from 'node:child_process';
 import { EventEmitter } from 'node:events';
-import { mkdirSync, mkdtempSync, rmSync } from 'node:fs';
+import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir, homedir } from 'node:os';
 import { join } from 'node:path';
 import { describe, expect, it, vi } from 'vitest';
-import { ProjectRuntimeManager, createProjectRuntimeConfig, listInstalledNvmNodeVersions, type RuntimeUpdate } from './projectRuntime.js';
+import { ProjectRuntimeManager, createProjectRuntimeConfig, listInstalledNvmNodeVersions, resolveGitMergePreview, type RuntimeUpdate } from './projectRuntime.js';
 
 class FakeChild extends EventEmitter {
   stdout = new EventEmitter();
@@ -23,6 +24,24 @@ function withTempNvmVersions(callback: (versionsDir: string) => void) {
   }
 }
 
+function git(cwd: string, args: string[]) {
+  return execFileSync('git', ['-C', cwd, ...args], {
+    encoding: 'utf8',
+    stdio: ['ignore', 'pipe', 'pipe']
+  });
+}
+
+function createGitRepo() {
+  const cwd = mkdtempSync(join(tmpdir(), 'launch-bay-merge-preview-'));
+  git(cwd, ['init', '-b', 'main']);
+  git(cwd, ['config', 'user.email', 'launch-bay@example.test']);
+  git(cwd, ['config', 'user.name', 'Launch Bay']);
+  writeFileSync(join(cwd, 'README.md'), 'hello\n');
+  git(cwd, ['add', 'README.md']);
+  git(cwd, ['commit', '-m', 'initial']);
+  return cwd;
+}
+
 // Shared per-test sample config so individual cases stay focused.
 function sampleConfigs() {
   return [
@@ -38,6 +57,33 @@ function sampleConfigs() {
 }
 
 describe('ProjectRuntimeManager', () => {
+  it('previews a branch merge without mutating the current branch', () => {
+    const cwd = createGitRepo();
+    try {
+      git(cwd, ['checkout', '-b', 'feature/preview']);
+      mkdirSync(join(cwd, 'src'));
+      writeFileSync(join(cwd, 'src/app.ts'), 'export const app = 1;\n');
+      git(cwd, ['add', 'src/app.ts']);
+      git(cwd, ['commit', '-m', 'Add app shell']);
+      writeFileSync(join(cwd, 'README.md'), 'hello\nworld\n');
+      git(cwd, ['add', 'README.md']);
+      git(cwd, ['commit', '-m', 'Update readme']);
+      git(cwd, ['checkout', 'main']);
+
+      const preview = resolveGitMergePreview(cwd, 'feature/preview');
+
+      expect(preview.targetBranch).toBe('main');
+      expect(preview.sourceBranch).toBe('feature/preview');
+      expect(preview.canMerge).toBe(true);
+      expect(preview.blockers).toEqual([]);
+      expect(preview.commits.map((commit) => commit.subject)).toEqual(['Update readme', 'Add app shell']);
+      expect(preview.files.map((file) => `${file.status}:${file.path}`)).toEqual(['M:README.md', 'A:src/app.ts']);
+      expect(git(cwd, ['rev-parse', '--abbrev-ref', 'HEAD']).trim()).toBe('main');
+    } finally {
+      rmSync(cwd, { recursive: true, force: true });
+    }
+  });
+
   it('lists only installed NVM Node versions for server selection', () => {
     withTempNvmVersions((versionsDir) => {
       mkdirSync(join(versionsDir, 'v18.20.8', 'bin'), { recursive: true });

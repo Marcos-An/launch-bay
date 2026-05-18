@@ -434,6 +434,9 @@ ipcMain.handle('launch-bay:project-branch-switch', async (_event, projectId: str
 ipcMain.handle('launch-bay:project-branch-merge', async (_event, projectId: string, branch: string) =>
   runtimeManager.mergeBranch(projectId, branch)
 );
+ipcMain.handle('launch-bay:project-branch-merge-preview', async (_event, projectId: string, branch: string) =>
+  runtimeManager.getBranchMergePreview(projectId, branch)
+);
 ipcMain.handle('launch-bay:project-git-snapshot', async (_event, projectId: string) => runtimeManager.getGitSnapshot(projectId));
 ipcMain.handle('launch-bay:project-file-diff', async (_event, projectId: string, filePath: string, kind?: 'worktree' | 'staged' | 'untracked') =>
   runtimeManager.getFileDiff(projectId, filePath, kind)

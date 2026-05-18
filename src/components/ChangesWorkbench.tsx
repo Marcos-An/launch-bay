@@ -70,15 +70,31 @@ function summarize(files: GitFileChange[]) {
 type ChangesWorkbenchProps = {
   projectId: string;
   projectName: string;
+  ariaLabel?: string;
+  hideCollapsed?: boolean;
+  initialCollapsed?: boolean;
+  onExpandedChange?: (expanded: boolean) => void;
 };
 
-export function ChangesWorkbench({ projectId, projectName }: ChangesWorkbenchProps) {
+export function ChangesWorkbench({
+  projectId,
+  projectName,
+  ariaLabel = 'Changes workbench',
+  hideCollapsed = false,
+  initialCollapsed = true,
+  onExpandedChange
+}: ChangesWorkbenchProps) {
   const [snapshot, setSnapshot] = useState<GitSnapshot>(EMPTY_SNAPSHOT);
   const [loadingSnapshot, setLoadingSnapshot] = useState(false);
   const [selectedPath, setSelectedPath] = useState<string | undefined>(undefined);
   const [diff, setDiff] = useState<FileDiff | undefined>(undefined);
   const [loadingDiff, setLoadingDiff] = useState(false);
-  const [collapsed, setCollapsed] = useState(true);
+  const [collapsed, setCollapsed] = useState(initialCollapsed);
+  const [reviewOpen, setReviewOpen] = useState(false);
+  const [reviewTabs, setReviewTabs] = useState<string[]>([]);
+  const [activeReviewPath, setActiveReviewPath] = useState<string | undefined>(undefined);
+  const [reviewDiffs, setReviewDiffs] = useState<Record<string, FileDiff | undefined>>({});
+  const [loadingReviewDiffs, setLoadingReviewDiffs] = useState<Record<string, boolean>>({});
 
   const bridge = window.launchBay;
   const hasGitBridge = Boolean(bridge?.getProjectGitSnapshot && bridge?.getProjectFileDiff);
@@ -86,9 +102,19 @@ export function ChangesWorkbench({ projectId, projectName }: ChangesWorkbenchPro
     () => snapshot.files.find((file) => file.path === selectedPath) ?? snapshot.files[0],
     [selectedPath, snapshot.files]
   );
+  const activeReviewFile = useMemo(
+    () => snapshot.files.find((file) => file.path === activeReviewPath),
+    [activeReviewPath, snapshot.files]
+  );
+  const activeReviewDiff = activeReviewPath ? reviewDiffs[activeReviewPath] : undefined;
+  const activeReviewLoading = activeReviewPath ? Boolean(loadingReviewDiffs[activeReviewPath]) : false;
   const summary = useMemo(() => summarize(snapshot.files), [snapshot.files]);
   const branchLabel = snapshot.branch ?? 'No branch';
   const fileCountLabel = `${snapshot.files.length} file${snapshot.files.length === 1 ? '' : 's'}`;
+
+  useEffect(() => {
+    setCollapsed(initialCollapsed);
+  }, [initialCollapsed, projectId]);
 
   const applySnapshot = useCallback((nextSnapshot: GitSnapshot) => {
     setSnapshot(nextSnapshot);
@@ -96,6 +122,46 @@ export function ChangesWorkbench({ projectId, projectName }: ChangesWorkbenchPro
       if (current && nextSnapshot.files.some((file) => file.path === current)) return current;
       return nextSnapshot.files[0]?.path;
     });
+  }, []);
+
+  const setWorkbenchCollapsed = useCallback((nextCollapsed: boolean) => {
+    setCollapsed(nextCollapsed);
+    onExpandedChange?.(!nextCollapsed);
+  }, [onExpandedChange]);
+
+  const selectInlineFile = useCallback((file: GitFileChange) => {
+    setSelectedPath(file.path);
+  }, []);
+
+  const openReview = useCallback(() => {
+    const path = selectedFile?.path ?? snapshot.files[0]?.path;
+    if (!path) return;
+    setReviewTabs((current) => current.includes(path) ? current : [...current, path]);
+    setActiveReviewPath(path);
+    setReviewOpen(true);
+  }, [selectedFile, snapshot.files]);
+
+  const openReviewFile = useCallback((file: GitFileChange) => {
+    setReviewTabs((current) => current.includes(file.path) ? current : [...current, file.path]);
+    setActiveReviewPath(file.path);
+    setReviewOpen(true);
+  }, []);
+
+  const closeReviewTab = useCallback((path: string) => {
+    setReviewTabs((current) => {
+      const next = current.filter((tabPath) => tabPath !== path);
+      setActiveReviewPath((activePath) => {
+        if (activePath !== path) return activePath;
+        const closedIndex = current.indexOf(path);
+        return next[closedIndex] ?? next[closedIndex - 1] ?? next[0];
+      });
+      if (next.length === 0) setReviewOpen(false);
+      return next;
+    });
+  }, []);
+
+  const closeReview = useCallback(() => {
+    setReviewOpen(false);
   }, []);
 
   const refreshSnapshot = useCallback(() => {
@@ -181,16 +247,56 @@ export function ChangesWorkbench({ projectId, projectName }: ChangesWorkbenchPro
     };
   }, [bridge, collapsed, hasGitBridge, projectId, selectedFile]);
 
+  useEffect(() => {
+    if (!hasGitBridge || !reviewOpen || !activeReviewFile) return undefined;
+
+    let cancelled = false;
+    const path = activeReviewFile.path;
+    const kind = diffKindFor(activeReviewFile);
+    setLoadingReviewDiffs((current) => ({ ...current, [path]: true }));
+
+    bridge!.getProjectFileDiff!(projectId, path, kind)
+      .then((nextDiff) => {
+        if (!cancelled) {
+          setReviewDiffs((current) => ({ ...current, [path]: nextDiff }));
+        }
+      })
+      .catch((error) => {
+        if (!cancelled) {
+          setReviewDiffs((current) => ({
+            ...current,
+            [path]: {
+              path,
+              kind,
+              diff: '',
+              error: error instanceof Error ? error.message : String(error)
+            }
+          }));
+        }
+      })
+      .finally(() => {
+        if (!cancelled) {
+          setLoadingReviewDiffs((current) => ({ ...current, [path]: false }));
+        }
+      });
+
+    return () => {
+      cancelled = true;
+    };
+  }, [activeReviewFile, bridge, hasGitBridge, projectId, reviewOpen]);
+
   if (collapsed) {
+    if (hideCollapsed) return null;
+
     return (
-      <aside className="changes-workbench changes-workbench-collapsed" aria-label="Changes workbench">
+      <aside className="changes-workbench changes-workbench-collapsed" aria-label={ariaLabel}>
         <button
           className={`changes-compact-card ${snapshot.conflicts.length > 0 ? 'changes-compact-card-conflict' : ''}`}
           type="button"
-          onClick={() => setCollapsed(false)}
+          onClick={() => setWorkbenchCollapsed(false)}
           aria-label={`Expand changes workbench for ${branchLabel}`}
         >
-          <span className="changes-compact-kicker">Changes</span>
+          <span className="changes-compact-kicker">Changes · {projectName}</span>
           <span className="changes-compact-main">
             <strong>{branchLabel}</strong>
             <span>{fileCountLabel}</span>
@@ -208,7 +314,8 @@ export function ChangesWorkbench({ projectId, projectName }: ChangesWorkbenchPro
   }
 
   return (
-    <aside className="changes-workbench" aria-label="Changes workbench">
+    <>
+      <aside className="changes-workbench" aria-label={ariaLabel}>
       <header className="changes-head">
         <div>
           <div className="changes-eyebrow">Workbench</div>
@@ -226,7 +333,7 @@ export function ChangesWorkbench({ projectId, projectName }: ChangesWorkbenchPro
           <button
             className="changes-icon-button"
             type="button"
-            onClick={() => setCollapsed(true)}
+            onClick={() => setWorkbenchCollapsed(true)}
             aria-label="Minimize changes workbench"
             title="Minimize changes workbench"
           >
@@ -267,6 +374,14 @@ export function ChangesWorkbench({ projectId, projectName }: ChangesWorkbenchPro
             <span><strong>{summary.added}</strong> A</span>
             <span><strong>{summary.deleted}</strong> D</span>
             {summary.conflicts ? <span className="summary-conflict"><strong>{summary.conflicts}</strong> conflicts</span> : null}
+            <button
+              className="changes-summary-action"
+              type="button"
+              onClick={openReview}
+              disabled={snapshot.files.length === 0}
+            >
+              Ver todos os arquivos
+            </button>
           </section>
 
           <section className="changes-file-list" aria-label={`${projectName} changed files`}>
@@ -277,7 +392,7 @@ export function ChangesWorkbench({ projectId, projectName }: ChangesWorkbenchPro
                 className={`change-file ${selectedFile?.path === file.path ? 'active' : ''} change-file-${file.status}`}
                 type="button"
                 key={`${file.status}:${file.oldPath ?? ''}:${file.path}`}
-                onClick={() => setSelectedPath(file.path)}
+                onClick={() => selectInlineFile(file)}
                 aria-label={`${STATUS_LABELS[file.status]} ${file.path}`}
               >
                 <span className="change-file-badge">{STATUS_SHORT[file.status]}</span>
@@ -316,6 +431,92 @@ export function ChangesWorkbench({ projectId, projectName }: ChangesWorkbenchPro
           </section>
         </>
       )}
-    </aside>
+      </aside>
+      {reviewOpen ? (
+        <div className="changes-review-backdrop" role="presentation">
+          <section className="changes-review-modal" role="dialog" aria-modal="true" aria-label="Diff review">
+            <header className="changes-review-head">
+              <div>
+                <div className="changes-eyebrow">{projectName}</div>
+                <h2>Diff review</h2>
+              </div>
+              <button
+                className="changes-icon-button"
+                type="button"
+                onClick={closeReview}
+                aria-label="Close diff review"
+                title="Close diff review"
+              >
+                <span aria-hidden="true">×</span>
+              </button>
+            </header>
+
+            <div className="changes-review-body">
+              <aside className="changes-review-files" aria-label={`${projectName} review files`}>
+                {snapshot.files.map((file) => (
+                  <button
+                    className={`change-file ${activeReviewPath === file.path ? 'active' : ''} change-file-${file.status}`}
+                    type="button"
+                    key={`review:${file.status}:${file.oldPath ?? ''}:${file.path}`}
+                    onClick={() => openReviewFile(file)}
+                    aria-label={`${STATUS_LABELS[file.status]} ${file.path}`}
+                  >
+                    <span className="change-file-badge">{STATUS_SHORT[file.status]}</span>
+                    <span className="change-file-copy">
+                      <span className="change-file-path">{file.path}</span>
+                      {file.oldPath ? <span className="change-file-old">from {file.oldPath}</span> : null}
+                    </span>
+                    <span className="change-file-state">{file.staged ? 'staged' : file.unstaged ? 'worktree' : ''}</span>
+                  </button>
+                ))}
+              </aside>
+
+              <section className="changes-review-editor" aria-label="Tabbed diff editor">
+                <div className="changes-review-tabs" role="tablist" aria-label="Open diff tabs">
+                  {reviewTabs.map((path) => (
+                    <div className={`changes-review-tab ${activeReviewPath === path ? 'active' : ''}`} key={`tab:${path}`}>
+                      <button
+                        type="button"
+                        role="tab"
+                        aria-selected={activeReviewPath === path}
+                        onClick={() => setActiveReviewPath(path)}
+                      >
+                        {path}
+                      </button>
+                      <button
+                        className="changes-review-tab-close"
+                        type="button"
+                        aria-label={`Close ${path} tab`}
+                        onClick={() => closeReviewTab(path)}
+                      >
+                        ×
+                      </button>
+                    </div>
+                  ))}
+                </div>
+
+                <div className="changes-review-pane" role="tabpanel" aria-label={activeReviewPath ? `Full diff panel for ${activeReviewPath}` : 'Full diff panel'}>
+                  {activeReviewLoading ? (
+                    <div className="changes-empty">Loading diff…</div>
+                  ) : activeReviewDiff?.error ? (
+                    <div className="changes-warning" role="alert">{activeReviewDiff.error}</div>
+                  ) : activeReviewDiff?.binary ? (
+                    <div className="changes-empty">Binary diff preview is not available.</div>
+                  ) : activeReviewDiff?.diff ? (
+                    <pre className="diff-code changes-review-diff-code" aria-label={`Full diff for ${activeReviewDiff.path}`}>
+                      {activeReviewDiff.diff.split('\n').map((line, index) => (
+                        <span className={diffLineClass(line)} key={`review:${index}:${line.slice(0, 12)}`}>{line || ' '}</span>
+                      ))}
+                    </pre>
+                  ) : (
+                    <div className="changes-empty">Select a changed file to open its diff.</div>
+                  )}
+                </div>
+              </section>
+            </div>
+          </section>
+        </div>
+      ) : null}
+    </>
   );
 }

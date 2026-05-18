@@ -81,6 +81,18 @@ function createLocalAgentSessionId(kind: AgentSessionKind) {
   return `${kind}-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
 }
 
+function nextSessionName(baseName: string, existingNames: string[]) {
+  const used = new Set(existingNames.map((name) => name.trim()).filter(Boolean));
+  if (!used.has(baseName)) return baseName;
+  let counter = 2;
+  let candidate = `${baseName} ${counter}`;
+  while (used.has(candidate)) {
+    counter += 1;
+    candidate = `${baseName} ${counter}`;
+  }
+  return candidate;
+}
+
 function safeReadStorage(key: string): string | null {
   try {
     return window.localStorage?.getItem(key) ?? null;
@@ -221,6 +233,31 @@ function readStoredSurface(): Surface {
   return storedSurface === 'hermes' || storedSurface === 'server' ? storedSurface : DEFAULT_SURFACE;
 }
 
+function ServerChangesWorkbench({
+  server,
+  scopedLabel,
+  onClose
+}: {
+  server?: ServerConfig;
+  scopedLabel: boolean;
+  onClose: () => void;
+}) {
+  if (!server) return null;
+
+  return (
+    <ChangesWorkbench
+      key={server.id}
+      projectId={server.id}
+      projectName={server.name}
+      ariaLabel={scopedLabel ? `Changes workbench for ${server.name}` : 'Changes workbench'}
+      initialCollapsed={false}
+      onExpandedChange={(expanded) => {
+        if (!expanded) onClose();
+      }}
+    />
+  );
+}
+
 function App() {
   const [projectName, setProjectName] = useState<string>(readStoredProjectName);
   const [launchConfig, setLaunchConfig] = useState<LaunchBayConfig>(readCachedLaunchBayConfig);
@@ -232,7 +269,9 @@ function App() {
   const [runtimeSnapshots, setRuntimeSnapshots] = useState<Record<string, RuntimeSnapshot>>({});
   const [projectBranches, setProjectBranches] = useState<Record<string, ProjectBranchState>>({});
   const [branchFilters, setBranchFilters] = useState<Record<string, string>>({});
+  const [branchActionNotices, setBranchActionNotices] = useState<Record<string, string>>({});
   const [selectedServerIds, setSelectedServerIds] = useState<Record<string, string>>({});
+  const [activeChangesServerId, setActiveChangesServerId] = useState<string | undefined>(undefined);
   const [activeGitOperation, setActiveGitOperation] = useState<ActiveGitOperation | undefined>(undefined);
   const [mergeConfirmation, setMergeConfirmation] = useState<MergeConfirmation | undefined>(undefined);
   const [hermesSnapshots, setHermesSnapshots] = useState<Record<string, HermesSnapshot>>({});
@@ -262,6 +301,7 @@ function App() {
   const [newSessionCommand, setNewSessionCommand] = useState(DEFAULT_AGENT_TOOL.command);
   const [renamingSessionId, setRenamingSessionId] = useState<string | undefined>(undefined);
   const [renameDraft, setRenameDraft] = useState('');
+  const [sessionToKill, setSessionToKill] = useState<AgentSession | undefined>(undefined);
   const [renamingServerId, setRenamingServerId] = useState<string | undefined>(undefined);
   const [renameServerDraft, setRenameServerDraft] = useState('');
   const composerInputRef = useRef<HTMLTextAreaElement>(null);
@@ -350,17 +390,18 @@ function App() {
     ?? selectedWorkspaceServers[0];
   const selectedServerProject = selectedWorkspace ? workspaceToProject(selectedWorkspace, selectedServerConfig) : selectedProject;
   const selectedRuntimeId = selectedServerConfig?.id ?? selectedProject.id;
+  const activeChangesServerConfig = selectedWorkspaceServers.find((server) => server.id === activeChangesServerId);
   const hasProjects = launchConfig.workspaces.length > 0;
   const hasConfiguredServer = Boolean(selectedServerConfig);
-  const runtimeSnapshot = runtimeSnapshots[selectedRuntimeId];
-  const projectBranchState = projectBranches[selectedRuntimeId];
+  const runtimeSnapshot = hasConfiguredServer ? runtimeSnapshots[selectedRuntimeId] : undefined;
+  const projectBranchState = hasConfiguredServer ? projectBranches[selectedRuntimeId] : undefined;
   const currentStatus = runtimeSnapshot?.status ?? selectedServerProject.status;
-  const currentBranch = runtimeSnapshot?.branch ?? projectBranchState?.current;
+  const currentBranch = hasConfiguredServer ? runtimeSnapshot?.branch ?? projectBranchState?.current : undefined;
   const projectTerminals = embeddedTerminals[selectedRuntimeId] ?? [];
   const activeTerminalId = projectTerminals.some((terminal) => terminal.id === activeTerminalIds[selectedRuntimeId])
     ? activeTerminalIds[selectedRuntimeId]
     : projectTerminals[0]?.id;
-  const currentDirty = runtimeSnapshot?.dirty ?? projectBranchState?.dirty;
+  const currentDirty = hasConfiguredServer ? runtimeSnapshot?.dirty ?? projectBranchState?.dirty : undefined;
   const branchSubtitle = currentBranch
     ? currentDirty
       ? `${currentBranch} · dirty`
@@ -455,7 +496,17 @@ function App() {
   const defaultHermesSessionId = createDefaultHermesSessionId(selectedProject.id);
   const defaultHermesSessionName = defaultHermesSessionNames[selectedProject.id] ?? 'Hermes';
   const defaultHermesPrompt = selectedProject.prompt.replace('Hermes', defaultHermesSessionName);
+  const existingSessionNames = useMemo(
+    () => [defaultHermesSessionName, ...projectAgentSessions.map((session) => session.name)],
+    [defaultHermesSessionName, projectAgentSessions]
+  );
   const agentToolOptions = availableAgentTools.length > 0 ? availableAgentTools : [DEFAULT_AGENT_TOOL];
+
+  useEffect(() => {
+    if (activeChangesServerId && !selectedWorkspaceServers.some((server) => server.id === activeChangesServerId)) {
+      setActiveChangesServerId(undefined);
+    }
+  }, [activeChangesServerId, selectedWorkspaceServers]);
 
   useEffect(() => {
     safeWriteStorage(WORKSPACE_PROJECT_STORAGE_KEY, selectedProject.id);
@@ -565,7 +616,7 @@ function App() {
 
   useEffect(() => {
     const bridge = window.launchBay;
-    if (!bridge?.getRuntimeStatus) return undefined;
+    if (!hasConfiguredServer || !bridge?.getRuntimeStatus) return undefined;
 
     let cancelled = false;
     const projectId = selectedRuntimeId;
@@ -597,11 +648,11 @@ function App() {
       window.removeEventListener('focus', refreshRuntimeStatus);
       document.removeEventListener('visibilitychange', refreshWhenVisible);
     };
-  }, [selectedRuntimeId, configSyncVersion]);
+  }, [hasConfiguredServer, selectedRuntimeId, configSyncVersion]);
 
   useEffect(() => {
     const bridge = window.launchBay;
-    if (!bridge?.listProjectBranches) return undefined;
+    if (!hasConfiguredServer || !bridge?.listProjectBranches) return undefined;
 
     let cancelled = false;
     const projectId = selectedRuntimeId;
@@ -616,7 +667,7 @@ function App() {
     return () => {
       cancelled = true;
     };
-  }, [selectedRuntimeId, configSyncVersion]);
+  }, [hasConfiguredServer, selectedRuntimeId, configSyncVersion]);
 
   useEffect(() => {
     if (!hasHermesBridge) return undefined;
@@ -924,6 +975,17 @@ function App() {
           ? await bridge!.switchProjectBranch!(projectId, branch!)
           : await bridge!.mergeProjectBranch!(projectId, branch!);
       setProjectBranches((current) => ({ ...current, [projectId]: branchState }));
+      setBranchActionNotices((current) => {
+        const next = { ...current };
+        if (branchState.error) {
+          delete next[projectId];
+        } else if (action === 'merge' && branch) {
+          next[projectId] = `Merged ${branch} into ${branchState.current ?? projectBranchState?.current ?? 'current branch'}.`;
+        } else {
+          delete next[projectId];
+        }
+        return next;
+      });
       if (branchState.runtime) {
         setRuntimeSnapshots((current) => ({ ...current, [projectId]: branchState.runtime! }));
       }
@@ -935,12 +997,47 @@ function App() {
   function requestMergeBranch(sourceBranch: string) {
     const targetBranch = projectBranchState?.current;
     if (!targetBranch || sourceBranch === targetBranch || !canMergeBranches) return;
-    setMergeConfirmation({ projectId: selectedRuntimeId, sourceBranch, targetBranch });
+    const projectId = selectedRuntimeId;
+    const baseConfirmation: MergeConfirmation = {
+      projectId,
+      sourceBranch,
+      targetBranch,
+      repoCwd: projectBranchState?.cwd ?? selectedServerProject.cwd,
+      sourceBranchInfo: branchOptions.find((branch) => branch.name === sourceBranch),
+      targetBranchInfo: branchOptions.find((branch) => branch.name === targetBranch),
+      previewStatus: window.launchBay?.getProjectBranchMergePreview ? 'loading' : 'idle'
+    };
+    setMergeConfirmation(baseConfirmation);
+
+    const previewBridge = window.launchBay?.getProjectBranchMergePreview;
+    if (!previewBridge) return;
+    previewBridge(projectId, sourceBranch)
+      .then((preview) => {
+        setMergeConfirmation((current) => {
+          if (!current || current.projectId !== projectId || current.sourceBranch !== sourceBranch) return current;
+          return {
+            ...current,
+            repoCwd: preview.cwd || current.repoCwd,
+            targetBranch: preview.targetBranch ?? current.targetBranch,
+            preview,
+            previewStatus: 'ready',
+            previewError: preview.error
+          };
+        });
+      })
+      .catch((error) => {
+        const message = error instanceof Error ? error.message : 'Merge preview failed.';
+        setMergeConfirmation((current) => {
+          if (!current || current.projectId !== projectId || current.sourceBranch !== sourceBranch) return current;
+          return { ...current, previewStatus: 'error', previewError: message };
+        });
+      });
   }
 
   async function confirmMergeBranch() {
     const confirmation = mergeConfirmation;
     if (!confirmation) return;
+    if (confirmation.previewStatus === 'loading' || confirmation.preview?.canMerge === false) return;
     setMergeConfirmation(undefined);
     await runGitOperation('merge', confirmation.sourceBranch);
   }
@@ -996,7 +1093,7 @@ function App() {
   function openNewSessionModal() {
     const preset = agentToolOptions[0];
     setNewSessionKind(preset.id);
-    setNewSessionName(preset.label);
+    setNewSessionName(nextSessionName(preset.label, existingSessionNames));
     setNewSessionCommand(preset.command);
     setNewSessionModalOpen(true);
   }
@@ -1005,7 +1102,7 @@ function App() {
     if (!isSupportedAgentSessionKind(value)) return;
     const preset = getAgentSessionPreset(value, agentToolOptions);
     setNewSessionKind(value);
-    setNewSessionName(preset.label);
+    setNewSessionName(nextSessionName(preset.label, existingSessionNames));
     setNewSessionCommand(preset.command);
   }
 
@@ -1124,11 +1221,99 @@ function App() {
     }));
   }
 
+  function addHermesAttachments(conversationId: string, items: HermesImageAttachment[]) {
+    setHermesAttachments((current) => ({
+      ...current,
+      [conversationId]: [...(current[conversationId] ?? []), ...items]
+    }));
+  }
+
+  function addHermesResources(conversationId: string, items: HermesResourceAttachment[]) {
+    setHermesResources((current) => ({
+      ...current,
+      [conversationId]: [...(current[conversationId] ?? []), ...items]
+    }));
+  }
+
+  function removeHermesAttachment(conversationId: string, id: string) {
+    setHermesAttachments((current) => ({
+      ...current,
+      [conversationId]: (current[conversationId] ?? []).filter((item) => item.id !== id)
+    }));
+  }
+
+  function removeHermesResource(conversationId: string, id: string) {
+    setHermesResources((current) => ({
+      ...current,
+      [conversationId]: (current[conversationId] ?? []).filter((item) => item.id !== id)
+    }));
+  }
+
+  function clearHermesPendingItems(conversationId: string) {
+    setHermesAttachments((current) => ({ ...current, [conversationId]: [] }));
+    setHermesResources((current) => ({ ...current, [conversationId]: [] }));
+  }
+
+  function forgetHermesPendingItems(conversationId: string) {
+    setHermesAttachments((current) => {
+      const next = { ...current };
+      delete next[conversationId];
+      return next;
+    });
+    setHermesResources((current) => {
+      const next = { ...current };
+      delete next[conversationId];
+      return next;
+    });
+  }
+
+  async function pickHermesAttachment() {
+    const picker = window.launchBay?.chooseAttachmentFile;
+    if (!picker) return undefined;
+    const result = await picker();
+    if (result.canceled) return undefined;
+    if (result.image) return { kind: 'image' as const, image: result.image };
+    if (result.resource) return { kind: 'resource' as const, resource: result.resource };
+    return undefined;
+  }
+
+  async function readMentionedProjectFile(relativePath: string): Promise<HermesResourceAttachment | undefined> {
+    const reader = window.launchBay?.readProjectFile;
+    if (!reader || !selectedProject.cwd) return undefined;
+    const result = await reader(selectedProject.cwd, relativePath);
+    if (!result.text) return undefined;
+    return {
+      id: `mention-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`,
+      // Prefer the absolute URI returned by the main process
+      // (cross-platform via url.pathToFileURL). Fall back to
+      // a synthesised URI if the bridge didn't supply one.
+      uri: result.uri ?? `attachment://${relativePath}`,
+      mimeType: 'text/plain',
+      name: relativePath,
+      text: result.text,
+      sizeBytes: result.sizeBytes
+    };
+  }
+
   async function sendAgentSessionMessage(sessionId: string) {
     const session = projectAgentSessions.find((item) => item.id === sessionId);
     const text = session?.draft.trim() ?? '';
-    if (!text || session?.snapshot.pending || session?.kind !== 'hermes' || !window.launchBay?.sendHermesInstanceMessage) return;
-    const userMessage: HermesMessage = { id: `agent-${Date.now()}`, role: 'user', text };
+    const attachments = hermesAttachments[sessionId] ?? [];
+    const resources = hermesResources[sessionId] ?? [];
+    if (
+      (!text && attachments.length === 0 && resources.length === 0) ||
+      session?.snapshot.pending ||
+      session?.kind !== 'hermes' ||
+      !window.launchBay?.sendHermesInstanceMessage
+    ) return;
+    const userMessage: HermesMessage = {
+      id: `agent-${Date.now()}`,
+      role: 'user',
+      text,
+      images: attachments.length > 0 ? attachments : undefined,
+      resources: resources.length > 0 ? resources : undefined
+    };
+    clearHermesPendingItems(sessionId);
     setAgentSessions((current) => ({
       ...current,
       [selectedProject.id]: (current[selectedProject.id] ?? []).map((item) =>
@@ -1137,7 +1322,15 @@ function App() {
           : item
       )
     }));
-    const snapshot = await window.launchBay.sendHermesInstanceMessage(sessionId, text);
+    const snapshot =
+      attachments.length === 0 && resources.length === 0
+        ? await window.launchBay.sendHermesInstanceMessage(sessionId, text)
+        : await window.launchBay.sendHermesInstanceMessage(
+            sessionId,
+            text,
+            attachments.length > 0 ? attachments : undefined,
+            resources.length > 0 ? resources : undefined
+          );
     setAgentSessions((current) => ({
       ...current,
       [selectedProject.id]: (current[selectedProject.id] ?? []).map((item) =>
@@ -1149,6 +1342,7 @@ function App() {
   async function resetAgentSession(sessionId: string) {
     const session = projectAgentSessions.find((item) => item.id === sessionId);
     if (!session) return;
+    clearHermesPendingItems(sessionId);
     const snapshot = session.kind === 'hermes'
       ? await window.launchBay?.resetHermesInstance?.(sessionId)
       : EMPTY_HERMES;
@@ -1164,6 +1358,7 @@ function App() {
   async function closeAgentSession(sessionId: string) {
     const session = projectAgentSessions.find((item) => item.id === sessionId);
     if (session?.kind === 'hermes') await window.launchBay?.closeHermesInstance?.(sessionId);
+    forgetHermesPendingItems(sessionId);
     setAgentSessions((current) => ({
       ...current,
       [selectedProject.id]: (current[selectedProject.id] ?? []).filter((item) => item.id !== sessionId)
@@ -1172,6 +1367,21 @@ function App() {
       setSelectedAgentSessionId(undefined);
       setSurface('hermes');
     }
+  }
+
+  function requestKillAgentSession(session: AgentSession) {
+    setSessionToKill(session);
+  }
+
+  function cancelKillAgentSession() {
+    setSessionToKill(undefined);
+  }
+
+  async function confirmKillAgentSession() {
+    if (!sessionToKill) return;
+    const sessionId = sessionToKill.id;
+    setSessionToKill(undefined);
+    await closeAgentSession(sessionId);
   }
 
   async function openLocalUrl() {
@@ -1296,6 +1506,7 @@ function App() {
         renamingServerId={renamingServerId}
         renameServerDraft={renameServerDraft}
         agentToolOptions={agentToolOptions}
+        activeChangesServerId={activeChangesServerId}
         onResetHermesSession={() => void resetHermesSession()}
         onOpenProjectFolder={() => void openProjectFolder()}
         onSelectProject={selectProject}
@@ -1310,10 +1521,12 @@ function App() {
         onBeginRenameDefaultHermesSession={beginRenameDefaultHermesSession}
         onSelectAgentSession={selectAgentSession}
         onBeginRenameAgentSession={beginRenameAgentSession}
+        onRequestKillAgentSession={requestKillAgentSession}
         onCommitRenameSession={commitRenameAgentSession}
         onCancelRenameSession={cancelRenameSession}
         onRenameDraftChange={setRenameDraft}
         onSelectServer={selectServer}
+        onOpenChangesWorkbench={setActiveChangesServerId}
         onBeginRenameServer={beginRenameServer}
         onCommitRenameServer={() => void commitRenameServer()}
         onCancelRenameServer={cancelRenameServer}
@@ -1361,39 +1574,11 @@ function App() {
             transcriptRef={transcriptRef}
             attachments={hermesAttachments[selectedProject.id] ?? []}
             resources={hermesResources[selectedProject.id] ?? []}
-            onAddAttachments={(items) =>
-              setHermesAttachments((current) => ({
-                ...current,
-                [selectedProject.id]: [...(current[selectedProject.id] ?? []), ...items]
-              }))
-            }
-            onAddResources={(items) =>
-              setHermesResources((current) => ({
-                ...current,
-                [selectedProject.id]: [...(current[selectedProject.id] ?? []), ...items]
-              }))
-            }
-            onRemoveAttachment={(id) =>
-              setHermesAttachments((current) => ({
-                ...current,
-                [selectedProject.id]: (current[selectedProject.id] ?? []).filter((item) => item.id !== id)
-              }))
-            }
-            onRemoveResource={(id) =>
-              setHermesResources((current) => ({
-                ...current,
-                [selectedProject.id]: (current[selectedProject.id] ?? []).filter((item) => item.id !== id)
-              }))
-            }
-            onPickAttachment={async () => {
-              const picker = window.launchBay?.chooseAttachmentFile;
-              if (!picker) return undefined;
-              const result = await picker();
-              if (result.canceled) return undefined;
-              if (result.image) return { kind: 'image', image: result.image };
-              if (result.resource) return { kind: 'resource', resource: result.resource };
-              return undefined;
-            }}
+            onAddAttachments={(items) => addHermesAttachments(selectedProject.id, items)}
+            onAddResources={(items) => addHermesResources(selectedProject.id, items)}
+            onRemoveAttachment={(id) => removeHermesAttachment(selectedProject.id, id)}
+            onRemoveResource={(id) => removeHermesResource(selectedProject.id, id)}
+            onPickAttachment={window.launchBay?.chooseAttachmentFile ? pickHermesAttachment : undefined}
             onCancel={() => {
               const cancel = window.launchBay?.cancelHermesPrompt;
               if (cancel) void cancel(selectedProject.id);
@@ -1416,38 +1601,85 @@ function App() {
             skills={hermesSkills}
             onMentionFile={
               window.launchBay?.readProjectFile && selectedProject.cwd
-                ? async (relativePath) => {
-                    const reader = window.launchBay?.readProjectFile;
-                    if (!reader) return undefined;
-                    const result = await reader(selectedProject.cwd, relativePath);
-                    if (!result.text) return undefined;
-                    return {
-                      id: `mention-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`,
-                      // Prefer the absolute URI returned by the main process
-                      // (cross-platform via url.pathToFileURL). Fall back to
-                      // a synthesised URI if the bridge didn't supply one.
-                      uri: result.uri ?? `attachment://${relativePath}`,
-                      mimeType: 'text/plain',
-                      name: relativePath,
-                      text: result.text,
-                      sizeBytes: result.sizeBytes
-                    };
-                  }
+                ? readMentionedProjectFile
                 : undefined
             }
             />
-            <ChangesWorkbench projectId={selectedProject.id} projectName={selectedProject.name} />
+            <ServerChangesWorkbench
+              server={activeChangesServerConfig}
+              scopedLabel={selectedWorkspaceServers.length > 1}
+              onClose={() => setActiveChangesServerId(undefined)}
+            />
           </div>
         ) : surface === 'agent-session' && selectedAgentSession ? (
-          <AgentSessionView
-            projectName={selectedProject.name}
-            session={selectedAgentSession}
-            toolLabel={getAgentSessionPreset(selectedAgentSession.kind, agentToolOptions).label}
-            onDraftChange={(value) => setAgentSessionDraft(selectedAgentSession.id, value)}
-            onSend={() => void sendAgentSessionMessage(selectedAgentSession.id)}
-            onReset={() => void resetAgentSession(selectedAgentSession.id)}
-            onClose={() => void closeAgentSession(selectedAgentSession.id)}
-          />
+          selectedAgentSession.kind === 'hermes' ? (
+            <div className="chat-workbench-layout">
+              <HermesChatView
+                projectName={selectedProject.name}
+                projectSuggestions={selectedProject.suggestions}
+                sessionName={selectedAgentSession.name}
+                sessionPrompt={`Message ${selectedAgentSession.name}`}
+                snapshot={selectedAgentSession.snapshot}
+                isThinking={selectedAgentSession.snapshot.pending}
+                elapsedLabel="00:00"
+                contextUsageLabel={formatContextUsage(selectedAgentSession.snapshot.contextUsage)}
+                hasHermesBridge={hasHermesBridge}
+                draft={selectedAgentSession.draft}
+                onDraftChange={(value) => setAgentSessionDraft(selectedAgentSession.id, value)}
+                onSend={() => void sendAgentSessionMessage(selectedAgentSession.id)}
+                onReset={() => void resetAgentSession(selectedAgentSession.id)}
+                composerInputRef={composerInputRef}
+                transcriptRef={transcriptRef}
+                attachments={hermesAttachments[selectedAgentSession.id] ?? []}
+                resources={hermesResources[selectedAgentSession.id] ?? []}
+                onAddAttachments={(items) => addHermesAttachments(selectedAgentSession.id, items)}
+                onAddResources={(items) => addHermesResources(selectedAgentSession.id, items)}
+                onRemoveAttachment={(id) => removeHermesAttachment(selectedAgentSession.id, id)}
+                onRemoveResource={(id) => removeHermesResource(selectedAgentSession.id, id)}
+                onPickAttachment={window.launchBay?.chooseAttachmentFile ? pickHermesAttachment : undefined}
+                onCancel={
+                  window.launchBay?.cancelHermesInstancePrompt
+                    ? () => void window.launchBay?.cancelHermesInstancePrompt?.(selectedAgentSession.id)
+                    : undefined
+                }
+                onOpenHistory={
+                  window.launchBay?.listHermesSessions && window.launchBay?.resumeHermesSession
+                    ? () => setPastSessionsOpen(true)
+                    : undefined
+                }
+                approvalMode={approvalMode}
+                onApprovalModeChange={
+                  window.launchBay?.setHermesApprovalMode
+                    ? (mode) => {
+                        setApprovalMode(mode);
+                        void window.launchBay?.setHermesApprovalMode?.(mode);
+                      }
+                    : undefined
+                }
+                projectFiles={projectFiles[selectedProject.cwd] ?? []}
+                onMentionFile={
+                  window.launchBay?.readProjectFile && selectedProject.cwd
+                    ? readMentionedProjectFile
+                    : undefined
+                }
+                skills={hermesSkills}
+              />
+              <ServerChangesWorkbench
+                server={activeChangesServerConfig}
+                scopedLabel={selectedWorkspaceServers.length > 1}
+                onClose={() => setActiveChangesServerId(undefined)}
+              />
+            </div>
+          ) : (
+            <AgentSessionView
+              projectName={selectedProject.name}
+              session={selectedAgentSession}
+              toolLabel={getAgentSessionPreset(selectedAgentSession.kind, agentToolOptions).label}
+              onDraftChange={(value) => setAgentSessionDraft(selectedAgentSession.id, value)}
+              onSend={() => void sendAgentSessionMessage(selectedAgentSession.id)}
+              onReset={() => void resetAgentSession(selectedAgentSession.id)}
+            />
+          )
         ) : (
           <ServerView
             projectName={selectedProject.name}
@@ -1471,6 +1703,7 @@ function App() {
             branchFilter={branchFilter}
             branchFallbackOption={branchFallbackOption}
             branchConfigWarning={branchConfigWarning}
+            branchActionNotice={branchActionNotices[selectedRuntimeId]}
             activeGitOperation={activeGitOperation?.projectId === selectedRuntimeId ? activeGitOperation : undefined}
             activeGitOperationLabel={activeGitOperationLabel}
             canSwitchBranches={canSwitchBranches}
@@ -1501,6 +1734,12 @@ function App() {
           projectName={selectedProject.name}
           sourceBranch={mergeConfirmation.sourceBranch}
           targetBranch={mergeConfirmation.targetBranch}
+          repoCwd={mergeConfirmation.repoCwd}
+          sourceBranchInfo={mergeConfirmation.sourceBranchInfo}
+          targetBranchInfo={mergeConfirmation.targetBranchInfo}
+          preview={mergeConfirmation.preview}
+          previewStatus={mergeConfirmation.previewStatus}
+          previewError={mergeConfirmation.previewError}
           onCancel={() => setMergeConfirmation(undefined)}
           onConfirm={() => void confirmMergeBranch()}
         />
@@ -1516,6 +1755,16 @@ function App() {
             setResetConfirmOpen(false);
             void resetHermesSession();
           }}
+        />
+      ) : null}
+      {sessionToKill ? (
+        <ConfirmModal
+          title={`Kill ${sessionToKill.name} session?`}
+          description={`This will close the ${sessionToKill.name} session and discard its current context. The project and files stay untouched.`}
+          confirmLabel="Kill session"
+          destructive
+          onCancel={cancelKillAgentSession}
+          onConfirm={() => void confirmKillAgentSession()}
         />
       ) : null}
       {workspaceToDelete ? (() => {
