@@ -832,6 +832,30 @@ describe('Launch Bay shell', () => {
     expect(within(changesNav).getAllByRole('button', { name: /Expand changes workbench/i })).toHaveLength(2);
   });
 
+  it('opens the right-side changes drawer without leaving the Server view', async () => {
+    const api = installLaunchBayMock({
+      getProjectFileDiff: vi.fn().mockResolvedValue({
+        path: 'src/App.tsx',
+        kind: 'worktree',
+        diff: 'diff --git a/src/App.tsx b/src/App.tsx\n@@ -1 +1 @@\n-old server\n+new server\n'
+      })
+    });
+    render(<App />);
+
+    fireEvent.click(screen.getByRole('button', { name: 'Server' }));
+    expect(await screen.findByRole('heading', { name: 'Sample server' })).toBeInTheDocument();
+    expect(screen.getByRole('button', { name: 'Start' })).toBeInTheDocument();
+
+    const changesNav = await screen.findByRole('group', { name: 'Changes' });
+    fireEvent.click(within(changesNav).getByRole('button', { name: /Expand changes workbench/i }));
+
+    const workbench = await screen.findByRole('complementary', { name: 'Changes workbench' });
+    expect(screen.getByRole('heading', { name: 'Sample server' })).toBeInTheDocument();
+    expect(screen.getByRole('button', { name: 'Start' })).toBeInTheDocument();
+    expect(await within(workbench).findByLabelText('Diff for src/App.tsx')).toHaveTextContent('+new server');
+    expect(api.getProjectFileDiff).toHaveBeenCalledWith('sample', 'src/App.tsx', 'worktree');
+  });
+
   it('keeps file clicks inline and opens the tabbed diff review from the summary action', async () => {
     const api = installLaunchBayMock({
       getProjectFileDiff: vi.fn().mockImplementation(async (_projectId: string, path: string, kind: string) => ({
@@ -865,6 +889,51 @@ describe('Launch Bay shell', () => {
     expect(within(dialog).getByRole('tab', { name: 'src/NewPanel.tsx' })).toBeInTheDocument();
     expect(within(dialog).getByRole('tab', { name: 'src/App.tsx' })).toHaveAttribute('aria-selected', 'true');
     expect(await within(dialog).findByLabelText('Full diff for src/App.tsx')).toHaveTextContent('+app modal');
+  });
+
+  it('groups changed files by status and copies the selected diff', async () => {
+    const writeText = vi.fn().mockResolvedValue(undefined);
+    const groupedDiff = 'diff --git a/src/App.tsx b/src/App.tsx\n@@ -1 +1 @@\n-old grouped\n+new grouped\n';
+    installLaunchBayMock({
+      getProjectGitSnapshot: vi.fn().mockResolvedValue({
+        cwd: '/repos/sample-app',
+        branch: 'feature/polish',
+        headSha: 'abc123',
+        upstream: 'origin/feature/polish',
+        ahead: 1,
+        behind: 0,
+        isDirty: true,
+        isMerging: true,
+        isRebasing: false,
+        isCherryPicking: false,
+        files: [
+          { path: 'src/App.tsx', status: 'modified', staged: false, unstaged: true },
+          { path: 'src/NewPanel.tsx', status: 'untracked', staged: false, unstaged: true },
+          { path: 'src/OldPanel.tsx', status: 'deleted', staged: true, unstaged: false },
+          { path: 'src/Conflict.tsx', status: 'conflicted', staged: false, unstaged: true }
+        ],
+        conflicts: [{ path: 'src/Conflict.tsx', status: 'UU', stages: { ours: true, theirs: true } }]
+      }),
+      getProjectFileDiff: vi.fn().mockResolvedValue({ path: 'src/App.tsx', kind: 'worktree', diff: groupedDiff })
+    });
+    const user = userEvent.setup();
+    setClipboardMock({ writeText });
+    render(<App />);
+
+    await user.click(await screen.findByRole('button', { name: /Expand changes workbench/i }));
+    const workbench = await screen.findByRole('complementary', { name: 'Changes workbench' });
+
+    expect(within(workbench).getByRole('group', { name: 'Modified changes' })).toHaveTextContent('src/App.tsx');
+    expect(within(workbench).getByRole('group', { name: 'New changes' })).toHaveTextContent('src/NewPanel.tsx');
+    expect(within(workbench).getByRole('group', { name: 'Deleted changes' })).toHaveTextContent('src/OldPanel.tsx');
+    expect(within(workbench).getByRole('group', { name: 'Conflicted changes' })).toHaveTextContent('src/Conflict.tsx');
+    expect(within(workbench).getByRole('alert')).toHaveTextContent(/Run your normal conflict resolution commands/i);
+
+    expect(await within(workbench).findByLabelText('Diff for src/App.tsx')).toHaveTextContent('+new grouped');
+    await user.click(within(workbench).getByRole('button', { name: 'Copy selected diff' }));
+
+    await waitFor(() => expect(within(workbench).getByRole('button', { name: 'Copy selected diff' })).toHaveTextContent('Copied'));
+    expect(writeText).toHaveBeenCalledWith(groupedDiff);
   });
 
   it('keeps the collapsed changes card fresh without touching an expanded diff review', async () => {
@@ -1689,7 +1758,7 @@ describe('Launch Bay shell', () => {
     expect(screen.queryByText('Sample ask')).not.toBeInTheDocument();
   });
 
-  it('surfaces Hermes errors returned by the Electron bridge', async () => {
+  it('surfaces polished Hermes empty and error states for the active session', async () => {
     installLaunchBayMock({
       sendHermesMessage: vi.fn().mockResolvedValue({
         messages: [{ id: 'u1', role: 'user', text: 'broken' }],
@@ -1700,10 +1769,16 @@ describe('Launch Bay shell', () => {
     const user = userEvent.setup();
     render(<App />);
 
+    expect(screen.getByText('Hermes is ready for Sample')).toBeInTheDocument();
+    expect(screen.getByText(/Start a focused chat for this project/i)).toBeInTheDocument();
+
     await user.type(screen.getByPlaceholderText(/Ask Hermes about Sample/i), 'broken');
     await user.click(screen.getByRole('button', { name: 'Send' }));
 
-    expect(await screen.findByText(/Hermes responded with HTTP 500/)).toBeInTheDocument();
+    const alert = await screen.findByRole('alert');
+    expect(alert).toHaveTextContent('Hermes hit a problem');
+    expect(alert).toHaveTextContent('Hermes responded with HTTP 500');
+    expect(alert).toHaveTextContent('Your messages stay in this session');
   });
 
   it('resets the active Hermes session from the composer', async () => {

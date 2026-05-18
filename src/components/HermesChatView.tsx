@@ -377,7 +377,9 @@ export function HermesChatView({
             <div className="chat-empty">
               <div className="chat-inner">
                 <div className="context">{projectName} context</div>
+                <div className="chat-session-ready">{sessionName} is ready for {projectName}</div>
                 <h1>What do you want to work on?</h1>
+                <p className="chat-empty-copy">Start a focused chat for this project. Replies will render here as formatted chat messages, and this session keeps its own context.</p>
                 <div className="suggestions">
                   {projectSuggestions.map((suggestion) => (
                     <div className="suggestion" key={suggestion}>{suggestion}</div>
@@ -432,7 +434,11 @@ export function HermesChatView({
       })()}
 
       {snapshot.error ? (
-        <div className="chat-error" role="alert">{snapshot.error}</div>
+        <div className="chat-error" role="alert">
+          <strong>{sessionName} hit a problem</strong>
+          <span>{snapshot.error}</span>
+          <small>Your messages stay in this session. Adjust the prompt or reset only if you want a clean context.</small>
+        </div>
       ) : null}
 
       {!hasHermesBridge ? (

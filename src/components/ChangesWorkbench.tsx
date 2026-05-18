@@ -23,6 +23,17 @@ const STATUS_SHORT: Record<GitFileChange['status'], string> = {
 
 const COLLAPSED_SNAPSHOT_REFRESH_MS = 5_000;
 
+const FILE_GROUPS: Array<{
+  key: string;
+  label: string;
+  statuses: GitFileChange['status'][];
+}> = [
+  { key: 'conflicted', label: 'Conflicted', statuses: ['conflicted'] },
+  { key: 'modified', label: 'Modified', statuses: ['modified', 'renamed', 'copied'] },
+  { key: 'new', label: 'New', statuses: ['added', 'untracked'] },
+  { key: 'deleted', label: 'Deleted', statuses: ['deleted'] }
+];
+
 const EMPTY_SNAPSHOT: GitSnapshot = {
   cwd: '',
   branch: null,
@@ -95,6 +106,7 @@ export function ChangesWorkbench({
   const [activeReviewPath, setActiveReviewPath] = useState<string | undefined>(undefined);
   const [reviewDiffs, setReviewDiffs] = useState<Record<string, FileDiff | undefined>>({});
   const [loadingReviewDiffs, setLoadingReviewDiffs] = useState<Record<string, boolean>>({});
+  const [copyDiffState, setCopyDiffState] = useState<'idle' | 'copied'>('idle');
 
   const bridge = window.launchBay;
   const hasGitBridge = Boolean(bridge?.getProjectGitSnapshot && bridge?.getProjectFileDiff);
@@ -109,6 +121,13 @@ export function ChangesWorkbench({
   const activeReviewDiff = activeReviewPath ? reviewDiffs[activeReviewPath] : undefined;
   const activeReviewLoading = activeReviewPath ? Boolean(loadingReviewDiffs[activeReviewPath]) : false;
   const summary = useMemo(() => summarize(snapshot.files), [snapshot.files]);
+  const groupedFiles = useMemo(
+    () => FILE_GROUPS.map((group) => ({
+      ...group,
+      files: snapshot.files.filter((file) => group.statuses.includes(file.status))
+    })).filter((group) => group.files.length > 0),
+    [snapshot.files]
+  );
   const branchLabel = snapshot.branch ?? 'No branch';
   const fileCountLabel = `${snapshot.files.length} file${snapshot.files.length === 1 ? '' : 's'}`;
 
@@ -131,7 +150,18 @@ export function ChangesWorkbench({
 
   const selectInlineFile = useCallback((file: GitFileChange) => {
     setSelectedPath(file.path);
+    setCopyDiffState('idle');
   }, []);
+
+  const copySelectedDiff = useCallback(async () => {
+    if (!diff?.diff || !window.navigator.clipboard?.writeText) return;
+    try {
+      await window.navigator.clipboard.writeText(diff.diff);
+      setCopyDiffState('copied');
+    } catch {
+      setCopyDiffState('idle');
+    }
+  }, [diff]);
 
   const openReview = useCallback(() => {
     const path = selectedFile?.path ?? snapshot.files[0]?.path;
@@ -174,6 +204,12 @@ export function ChangesWorkbench({
       })
       .finally(() => setLoadingSnapshot(false));
   }, [applySnapshot, bridge, hasGitBridge, projectId]);
+
+  useEffect(() => {
+    if (copyDiffState !== 'copied') return undefined;
+    const timeoutId = window.setTimeout(() => setCopyDiffState('idle'), 1500);
+    return () => window.clearTimeout(timeoutId);
+  }, [copyDiffState]);
 
   useEffect(() => {
     if (!hasGitBridge) return undefined;
@@ -227,7 +263,10 @@ export function ChangesWorkbench({
     setLoadingDiff(true);
     bridge!.getProjectFileDiff!(projectId, selectedFile.path, diffKindFor(selectedFile))
       .then((nextDiff) => {
-        if (!cancelled) setDiff(nextDiff);
+        if (!cancelled) {
+          setDiff(nextDiff);
+          setCopyDiffState('idle');
+        }
       })
       .catch((error) => {
         if (!cancelled) {
@@ -363,7 +402,7 @@ export function ChangesWorkbench({
             </div>
             {snapshot.conflicts.length > 0 ? (
               <div className="changes-conflict-banner" role="alert">
-                {snapshot.conflicts.length} conflicted file{snapshot.conflicts.length === 1 ? '' : 's'} need manual review before merge can continue.
+                {snapshot.conflicts.length} conflicted file{snapshot.conflicts.length === 1 ? '' : 's'} need manual review before merge can continue. Run your normal conflict resolution commands, then refresh this workbench.
               </div>
             ) : null}
           </section>
@@ -386,22 +425,37 @@ export function ChangesWorkbench({
 
           <section className="changes-file-list" aria-label={`${projectName} changed files`}>
             {snapshot.files.length === 0 ? (
-              <div className="changes-empty">No local changes yet.</div>
-            ) : snapshot.files.map((file) => (
-              <button
-                className={`change-file ${selectedFile?.path === file.path ? 'active' : ''} change-file-${file.status}`}
-                type="button"
-                key={`${file.status}:${file.oldPath ?? ''}:${file.path}`}
-                onClick={() => selectInlineFile(file)}
-                aria-label={`${STATUS_LABELS[file.status]} ${file.path}`}
+              <div className="changes-empty" role="status">
+                No local changes in {projectName}. This worktree is clean.
+              </div>
+            ) : groupedFiles.map((group) => (
+              <section
+                className="changes-file-group"
+                role="group"
+                aria-label={`${group.label} changes`}
+                key={group.key}
               >
-                <span className="change-file-badge">{STATUS_SHORT[file.status]}</span>
-                <span className="change-file-copy">
-                  <span className="change-file-path">{file.path}</span>
-                  {file.oldPath ? <span className="change-file-old">from {file.oldPath}</span> : null}
-                </span>
-                <span className="change-file-state">{file.staged ? 'staged' : file.unstaged ? 'worktree' : ''}</span>
-              </button>
+                <div className="changes-file-group-head">
+                  <span>{group.label}</span>
+                  <span>{group.files.length}</span>
+                </div>
+                {group.files.map((file) => (
+                  <button
+                    className={`change-file ${selectedFile?.path === file.path ? 'active' : ''} change-file-${file.status}`}
+                    type="button"
+                    key={`${file.status}:${file.oldPath ?? ''}:${file.path}`}
+                    onClick={() => selectInlineFile(file)}
+                    aria-label={`${STATUS_LABELS[file.status]} ${file.path}`}
+                  >
+                    <span className="change-file-badge">{STATUS_SHORT[file.status]}</span>
+                    <span className="change-file-copy">
+                      <span className="change-file-path">{file.path}</span>
+                      {file.oldPath ? <span className="change-file-old">from {file.oldPath}</span> : null}
+                    </span>
+                    <span className="change-file-state">{file.staged ? 'staged' : file.unstaged ? 'worktree' : ''}</span>
+                  </button>
+                ))}
+              </section>
             ))}
           </section>
 
@@ -411,7 +465,18 @@ export function ChangesWorkbench({
                 <span className="changes-diff-eyebrow">Diff</span>
                 <strong>{selectedFile?.path ?? 'Select a file'}</strong>
               </div>
-              {diff ? <span>{diff.kind}</span> : null}
+              <div className="changes-diff-actions">
+                {diff ? <span>{diff.kind}</span> : null}
+                <button
+                  className="changes-copy-diff"
+                  type="button"
+                  aria-label="Copy selected diff"
+                  onClick={() => void copySelectedDiff()}
+                  disabled={!diff?.diff || loadingDiff}
+                >
+                  {copyDiffState === 'copied' ? 'Copied' : 'Copy diff'}
+                </button>
+              </div>
             </div>
             {loadingDiff ? (
               <div className="changes-empty">Loading diff…</div>

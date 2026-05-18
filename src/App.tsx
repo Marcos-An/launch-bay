@@ -1671,62 +1671,76 @@ function App() {
               />
             </div>
           ) : (
-            <AgentSessionView
-              projectName={selectedProject.name}
-              session={selectedAgentSession}
-              toolLabel={getAgentSessionPreset(selectedAgentSession.kind, agentToolOptions).label}
-              onDraftChange={(value) => setAgentSessionDraft(selectedAgentSession.id, value)}
-              onSend={() => void sendAgentSessionMessage(selectedAgentSession.id)}
-              onReset={() => void resetAgentSession(selectedAgentSession.id)}
-            />
+            <div className="chat-workbench-layout">
+              <AgentSessionView
+                projectName={selectedProject.name}
+                session={selectedAgentSession}
+                toolLabel={getAgentSessionPreset(selectedAgentSession.kind, agentToolOptions).label}
+                onDraftChange={(value) => setAgentSessionDraft(selectedAgentSession.id, value)}
+                onSend={() => void sendAgentSessionMessage(selectedAgentSession.id)}
+                onReset={() => void resetAgentSession(selectedAgentSession.id)}
+              />
+              <ServerChangesWorkbench
+                server={activeChangesServerConfig}
+                scopedLabel={selectedWorkspaceServers.length > 1}
+                onClose={() => setActiveChangesServerId(undefined)}
+              />
+            </div>
           )
         ) : (
-          <ServerView
-            projectName={selectedProject.name}
-            projectCommand={selectedServerProject.command}
-            projectNodeVersion={selectedServerConfig?.nodeVersion ?? ''}
-            projectCwd={selectedServerProject.cwd}
-            projectUrl={selectedServerProject.url}
-            projectSubtitle={selectedServerProject.serverSub}
-            currentStatus={currentStatus}
-            currentPid={runtimeSnapshot?.pid}
-            branchSubtitle={branchSubtitle}
-            hasConfiguredServer={hasConfiguredServer}
-            hasRuntimeBridge={hasRuntimeBridge}
-            hasEmbeddedTerminalBridge={hasEmbeddedTerminalBridge}
-            canOpenLocalUrl={canOpenLocalUrl}
-            projectBranchState={projectBranchState}
-            visibleBranches={visibleBranches}
-            branchOptions={branchOptions}
-            branchControlStatus={branchControlStatus}
-            branchControlRepoCwd={projectBranchState?.cwd ?? selectedServerProject.cwd}
-            branchFilter={branchFilter}
-            branchFallbackOption={branchFallbackOption}
-            branchConfigWarning={branchConfigWarning}
-            branchActionNotice={branchActionNotices[selectedRuntimeId]}
-            activeGitOperation={activeGitOperation?.projectId === selectedRuntimeId ? activeGitOperation : undefined}
-            activeGitOperationLabel={activeGitOperationLabel}
-            canSwitchBranches={canSwitchBranches}
-            canFetchBranches={canFetchBranches}
-            canMergeBranches={canMergeBranches}
-            hasBranchBridge={hasBranchBridge}
-            projectTerminals={projectTerminals}
-            activeTerminalId={activeTerminalId}
-            onEditServer={editSelectedServer}
-            onNewServer={openNewServerModal}
-            onStart={() => void startServer()}
-            onStop={() => void stopServer()}
-            onOpenLocalUrl={() => void openLocalUrl()}
-            onRunGitOperation={(action, branch) => void runGitOperation(action, branch)}
-            onRequestMergeBranch={requestMergeBranch}
-            onBranchFilterChange={(value) => setBranchFilters((current) => ({ ...current, [selectedRuntimeId]: value }))}
-            onOpenEmbeddedTerminal={() => void openEmbeddedTerminal()}
-            onSelectTerminal={(id) => setActiveTerminalIds((current) => ({ ...current, [selectedRuntimeId]: id }))}
-            onWriteTerminal={writeEmbeddedTerminal}
-            onResizeTerminal={resizeEmbeddedTerminal}
-            onKillTerminal={(id) => void killEmbeddedTerminal(id)}
-            onCloseTerminal={(id) => void closeEmbeddedTerminal(id)}
-          />
+          <div className="chat-workbench-layout">
+            <ServerView
+              projectName={selectedProject.name}
+              projectCommand={selectedServerProject.command}
+              projectNodeVersion={selectedServerConfig?.nodeVersion ?? ''}
+              projectCwd={selectedServerProject.cwd}
+              projectUrl={selectedServerProject.url}
+              projectSubtitle={selectedServerProject.serverSub}
+              currentStatus={currentStatus}
+              currentPid={runtimeSnapshot?.pid}
+              branchSubtitle={branchSubtitle}
+              hasConfiguredServer={hasConfiguredServer}
+              hasRuntimeBridge={hasRuntimeBridge}
+              hasEmbeddedTerminalBridge={hasEmbeddedTerminalBridge}
+              canOpenLocalUrl={canOpenLocalUrl}
+              projectBranchState={projectBranchState}
+              visibleBranches={visibleBranches}
+              branchOptions={branchOptions}
+              branchControlStatus={branchControlStatus}
+              branchControlRepoCwd={projectBranchState?.cwd ?? selectedServerProject.cwd}
+              branchFilter={branchFilter}
+              branchFallbackOption={branchFallbackOption}
+              branchConfigWarning={branchConfigWarning}
+              branchActionNotice={branchActionNotices[selectedRuntimeId]}
+              activeGitOperation={activeGitOperation?.projectId === selectedRuntimeId ? activeGitOperation : undefined}
+              activeGitOperationLabel={activeGitOperationLabel}
+              canSwitchBranches={canSwitchBranches}
+              canFetchBranches={canFetchBranches}
+              canMergeBranches={canMergeBranches}
+              hasBranchBridge={hasBranchBridge}
+              projectTerminals={projectTerminals}
+              activeTerminalId={activeTerminalId}
+              onEditServer={editSelectedServer}
+              onNewServer={openNewServerModal}
+              onStart={() => void startServer()}
+              onStop={() => void stopServer()}
+              onOpenLocalUrl={() => void openLocalUrl()}
+              onRunGitOperation={(action, branch) => void runGitOperation(action, branch)}
+              onRequestMergeBranch={requestMergeBranch}
+              onBranchFilterChange={(value) => setBranchFilters((current) => ({ ...current, [selectedRuntimeId]: value }))}
+              onOpenEmbeddedTerminal={() => void openEmbeddedTerminal()}
+              onSelectTerminal={(id) => setActiveTerminalIds((current) => ({ ...current, [selectedRuntimeId]: id }))}
+              onWriteTerminal={writeEmbeddedTerminal}
+              onResizeTerminal={resizeEmbeddedTerminal}
+              onKillTerminal={(id) => void killEmbeddedTerminal(id)}
+              onCloseTerminal={(id) => void closeEmbeddedTerminal(id)}
+            />
+            <ServerChangesWorkbench
+              server={activeChangesServerConfig}
+              scopedLabel={selectedWorkspaceServers.length > 1}
+              onClose={() => setActiveChangesServerId(undefined)}
+            />
+          </div>
         )}
       </main>
       {mergeConfirmation ? (
